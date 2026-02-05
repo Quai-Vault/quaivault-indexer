@@ -1,0 +1,49 @@
+[Unit]
+Description=QuaiVault Indexer
+Documentation=https://github.com/your-org/quaivault-indexer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quai-indexer
+Group=quai-indexer
+WorkingDirectory=/opt/quaivault-indexer
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+
+# Environment
+EnvironmentFile=/opt/quaivault-indexer/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+
+# Allow network access
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Memory management
+MemoryMax=512M
+MemoryHigh=384M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quaivault-indexer
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

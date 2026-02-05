@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quaivault-indexer
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${HEALTH_CHECK_PORT:-3000}:${HEALTH_CHECK_PORT:-3000}"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${HEALTH_CHECK_PORT:-3000}/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # Optional: Backfill service (run manually)
+  backfill:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quaivault-backfill
+    env_file:
+      - .env
+    environment:
+      - BACKFILL_FROM=${BACKFILL_FROM:-0}
+      - BACKFILL_TO=${BACKFILL_TO:-}
+    command: ["node", "dist/backfill.js"]
+    profiles:
+      - backfill
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"

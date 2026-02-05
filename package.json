@@ -1,0 +1,44 @@
+{
+  "name": "quai-multisig-indexer",
+  "version": "1.0.0",
+  "description": "Indexing service for Quai Multisig wallets using Supabase",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "backfill": "tsx src/backfill.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "mkdir -p tests/e2e/logs && vitest run --config tests/e2e/vitest.e2e.config.ts 2>&1 | tee tests/e2e/logs/run.log",
+    "test:e2e:bg": "mkdir -p tests/e2e/logs && vitest run --config tests/e2e/vitest.e2e.config.ts > tests/e2e/logs/run.log 2>&1 &",
+    "test:e2e:watch": "vitest --config tests/e2e/vitest.e2e.config.ts",
+    "test:e2e:ui": "vitest --config tests/e2e/vitest.e2e.config.ts --ui",
+    "test:e2e:coverage": "vitest run --config tests/e2e/vitest.e2e.config.ts --coverage"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1",
+    "pino": "^8.17.0",
+    "pino-pretty": "^10.3.0",
+    "pino-roll": "^4.0.0",
+    "quais": "^1.0.0-alpha.52"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^20.10.0",
+    "eslint": "^9.0.0",
+    "tsx": "^4.6.0",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
