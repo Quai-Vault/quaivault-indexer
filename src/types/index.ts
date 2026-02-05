@@ -1,3 +1,27 @@
+// ============================================
+// Blockchain Types
+// ============================================
+
+/**
+ * Simplified log type for indexer use.
+ * Contains only the fields we need, without the full quais.Log methods.
+ */
+export interface IndexerLog {
+  address: string;
+  topics: string[];
+  data: string;
+  blockNumber: number;
+  transactionHash: string;
+  transactionIndex: number;
+  blockHash: string;
+  index: number;
+  removed: boolean;
+}
+
+// ============================================
+// Wallet Types
+// ============================================
+
 export interface Wallet {
   address: string;
   name?: string;

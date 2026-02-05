@@ -1,5 +1,5 @@
 import { quais } from 'quais';
-import type { DecodedEvent, TransactionType, DecodedParams } from '../types/index.js';
+import type { DecodedEvent, TransactionType, DecodedParams, IndexerLog } from '../types/index.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -162,7 +162,7 @@ const EVENT_ABIS: Record<string, string[]> = {
   ],
 };
 
-export function decodeEvent(log: quais.Log): DecodedEvent | null {
+export function decodeEvent(log: IndexerLog): DecodedEvent | null {
   const topic0 = log.topics[0];
 
   // Find matching event

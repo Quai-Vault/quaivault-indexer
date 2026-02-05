@@ -11,6 +11,13 @@ const ALLOWED_ORIGINS = [
   'https://quaivault.org',         // Mainnet production
 ];
 
+// Rate limiting configuration
+const RATE_LIMIT = {
+  windowMs: 60000,           // 1 minute window
+  maxRequests: 60,           // 60 requests per minute per IP
+  cleanupIntervalMs: 300000, // Clean up old entries every 5 minutes
+};
+
 export interface HealthStatus {
   status: 'healthy' | 'unhealthy';
   timestamp: string;
@@ -38,12 +45,92 @@ class HealthService {
   private trackedWalletsCount = 0;
   private isIndexerRunning = false;
 
+  // Rate limiting: Map of IP -> array of request timestamps
+  private rateLimitMap: Map<string, number[]> = new Map();
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
   setTrackedWalletsCount(count: number): void {
     this.trackedWalletsCount = count;
   }
 
   setIndexerRunning(running: boolean): void {
     this.isIndexerRunning = running;
+  }
+
+  /**
+   * Extract client IP from request, handling proxies
+   */
+  private getClientIp(req: IncomingMessage): string {
+    // Check X-Forwarded-For header (for reverse proxies)
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) {
+      const ips = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+      // Take the first IP (original client)
+      return ips.split(',')[0].trim();
+    }
+
+    // Fallback to socket remote address
+    return req.socket.remoteAddress || 'unknown';
+  }
+
+  /**
+   * Check if request should be rate limited
+   * Returns true if request is allowed, false if rate limited
+   */
+  private checkRateLimit(ip: string): boolean {
+    const now = Date.now();
+    const windowStart = now - RATE_LIMIT.windowMs;
+
+    // Get or create request history for this IP
+    let requests = this.rateLimitMap.get(ip) || [];
+
+    // Filter out requests outside the current window
+    requests = requests.filter(timestamp => timestamp > windowStart);
+
+    // Check if we're over the limit
+    if (requests.length >= RATE_LIMIT.maxRequests) {
+      // Update the map with filtered requests
+      this.rateLimitMap.set(ip, requests);
+      return false;
+    }
+
+    // Add current request and update map
+    requests.push(now);
+    this.rateLimitMap.set(ip, requests);
+    return true;
+  }
+
+  /**
+   * Send rate limit exceeded response
+   */
+  private sendRateLimitResponse(res: ServerResponse, headers: Record<string, string>): void {
+    const retryAfter = Math.ceil(RATE_LIMIT.windowMs / 1000);
+    res.writeHead(429, {
+      ...headers,
+      'Retry-After': String(retryAfter),
+    });
+    res.end(JSON.stringify({
+      error: 'Too Many Requests',
+      message: `Rate limit exceeded. Maximum ${RATE_LIMIT.maxRequests} requests per minute.`,
+      retryAfter,
+    }));
+  }
+
+  /**
+   * Clean up old rate limit entries to prevent memory growth
+   */
+  private cleanupRateLimitMap(): void {
+    const now = Date.now();
+    const windowStart = now - RATE_LIMIT.windowMs;
+
+    for (const [ip, requests] of this.rateLimitMap.entries()) {
+      const validRequests = requests.filter(ts => ts > windowStart);
+      if (validRequests.length === 0) {
+        this.rateLimitMap.delete(ip);
+      } else {
+        this.rateLimitMap.set(ip, validRequests);
+      }
+    }
   }
 
   private getCorsHeaders(origin: string | undefined): Record<string, string> {
@@ -66,14 +153,27 @@ class HealthService {
       return;
     }
 
+    // Start rate limit cleanup interval
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupRateLimitMap();
+    }, RATE_LIMIT.cleanupIntervalMs);
+
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       const origin = req.headers.origin;
       const corsHeaders = this.getCorsHeaders(origin);
+      const clientIp = this.getClientIp(req);
 
-      // Handle CORS preflight requests
+      // Handle CORS preflight requests (don't rate limit these)
       if (req.method === 'OPTIONS') {
         res.writeHead(204, corsHeaders);
         res.end();
+        return;
+      }
+
+      // Apply rate limiting
+      if (!this.checkRateLimit(clientIp)) {
+        logger.warn({ ip: clientIp, url: req.url }, 'Rate limit exceeded');
+        this.sendRateLimitResponse(res, corsHeaders);
         return;
       }
 
@@ -90,11 +190,20 @@ class HealthService {
     });
 
     this.server.listen(config.health.port, () => {
-      logger.info({ port: config.health.port }, 'Health check server started');
+      logger.info({ port: config.health.port }, 'Health check server started with rate limiting');
     });
   }
 
   async stop(): Promise<void> {
+    // Clear rate limit cleanup interval
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+
+    // Clear rate limit map
+    this.rateLimitMap.clear();
+
     if (this.server) {
       return new Promise((resolve) => {
         // Set a timeout to force close if graceful shutdown takes too long

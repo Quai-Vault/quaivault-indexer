@@ -2,6 +2,13 @@ import { quais, FetchRequest } from 'quais';
 import { config } from '../config.js';
 import { withRetry } from '../utils/retry.js';
 import { logger } from '../utils/logger.js';
+import {
+  validateBlockNumberResponse,
+  validateLogsResponse,
+  validateCallResponse,
+  validateBlockTimestampResponse,
+} from '../utils/validation.js';
+import { IndexerLog } from '../types/index.js';
 
 class QuaiService {
   private wsProvider: quais.WebSocketProvider | null = null;
@@ -61,7 +68,7 @@ class QuaiService {
       req.setHeader('Content-Type', 'application/json');
       const response = await req.send();
       const json = JSON.parse(response.bodyText);
-      return parseInt(json.result, 16);
+      return validateBlockNumberResponse(json);
     });
   }
 
@@ -70,7 +77,7 @@ class QuaiService {
     topics: (string | string[] | null)[],
     fromBlock: number,
     toBlock: number
-  ): Promise<quais.Log[]> {
+  ): Promise<IndexerLog[]> {
     await this.rateLimit();
 
     // Normalize addresses to lowercase for RPC compatibility
@@ -97,26 +104,20 @@ class QuaiService {
       const response = await req.send();
       const json = JSON.parse(response.bodyText);
 
-      if (json.error) {
-        throw new Error(`RPC Error: ${json.error.message || JSON.stringify(json.error)}`);
-      }
+      // Validate and parse response with strict schema validation
+      const validatedLogs = validateLogsResponse(json);
 
-      // Validate response format
-      if (json.result !== null && !Array.isArray(json.result)) {
-        throw new Error(`Unexpected RPC response: result is not an array`);
-      }
-
-      // Convert raw logs to quais.Log format
-      return (json.result || []).map((log: Record<string, unknown>) => ({
-        address: log.address as string,
-        topics: log.topics as string[],
-        data: log.data as string,
-        blockNumber: parseInt(log.blockNumber as string, 16),
-        transactionHash: log.transactionHash as string,
-        transactionIndex: parseInt(log.transactionIndex as string, 16),
-        blockHash: log.blockHash as string,
-        index: parseInt(log.logIndex as string, 16),
-        removed: log.removed as boolean,
+      // Convert validated logs to quais.Log format
+      return validatedLogs.map((log) => ({
+        address: log.address,
+        topics: log.topics,
+        data: log.data,
+        blockNumber: parseInt(log.blockNumber, 16),
+        transactionHash: log.transactionHash,
+        transactionIndex: parseInt(log.transactionIndex, 16),
+        blockHash: log.blockHash,
+        index: parseInt(log.logIndex, 16),
+        removed: log.removed,
       }));
     });
   }
@@ -136,11 +137,7 @@ class QuaiService {
       const response = await req.send();
       const json = JSON.parse(response.bodyText);
 
-      if (json.error) {
-        throw new Error(`RPC Error: ${json.error.message || JSON.stringify(json.error)}`);
-      }
-
-      return json.result;
+      return validateCallResponse(json);
     });
   }
 
@@ -167,17 +164,7 @@ class QuaiService {
       const response = await req.send();
       const json = JSON.parse(response.bodyText);
 
-      if (json.error) {
-        throw new Error(`RPC Error: ${json.error.message || JSON.stringify(json.error)}`);
-      }
-
-      // Quai blocks have timestamp in woHeader (work object header)
-      const ts = json.result?.woHeader?.timestamp || json.result?.timestamp;
-      if (!json.result || !ts) {
-        throw new Error(`Block ${blockNumber} not found or missing timestamp`);
-      }
-
-      return parseInt(ts, 16);
+      return validateBlockTimestampResponse(json, blockNumber);
     });
 
     // Cache the result (with LRU eviction)
@@ -196,7 +183,7 @@ class QuaiService {
   async subscribeToEvents(
     addresses: string[],
     topics: string[],
-    callback: (log: quais.Log) => void
+    callback: (log: IndexerLog) => void
   ): Promise<void> {
     if (!this.wsProvider) {
       this.wsProvider = new quais.WebSocketProvider(config.quai.wsUrl, undefined, {
