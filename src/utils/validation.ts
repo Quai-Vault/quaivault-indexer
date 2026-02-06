@@ -82,7 +82,7 @@ export function validateBytes32(hash: unknown, fieldName: string): string {
       `Invalid ${fieldName}: expected 0x-prefixed 64-character hex string, got "${String(hash)}"`
     );
   }
-  return hash;
+  return hash.toLowerCase();  // Normalize to lowercase for consistency
 }
 
 // ============================================

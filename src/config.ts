@@ -1,5 +1,26 @@
 import 'dotenv/config';
 
+/**
+ * Parse an integer from environment variable with bounds validation.
+ * Throws on invalid values to fail fast at startup.
+ */
+function parseIntWithBounds(
+  value: string | undefined,
+  defaultValue: number,
+  min: number,
+  max: number,
+  name: string
+): number {
+  const parsed = parseInt(value || String(defaultValue), 10);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${name}: expected integer, got "${value}"`);
+  }
+  if (parsed < min || parsed > max) {
+    throw new Error(`Invalid ${name}: ${parsed} outside range [${min}, ${max}]`);
+  }
+  return parsed;
+}
+
 export const config = {
   // Quai Network - base URL without shard path (usePathing: true handles routing)
   quai: {
@@ -28,37 +49,37 @@ export const config = {
 
   // Indexer settings
   indexer: {
-    batchSize: parseInt(process.env.BATCH_SIZE || '1000'),
-    pollInterval: parseInt(process.env.POLL_INTERVAL || '5000'),
-    startBlock: parseInt(process.env.START_BLOCK || '0'),
-    confirmations: parseInt(process.env.CONFIRMATIONS || '2'),
+    batchSize: parseIntWithBounds(process.env.BATCH_SIZE, 1000, 10, 10000, 'BATCH_SIZE'),
+    pollInterval: parseIntWithBounds(process.env.POLL_INTERVAL, 5000, 1000, 60000, 'POLL_INTERVAL'),
+    startBlock: parseIntWithBounds(process.env.START_BLOCK, 0, 0, Number.MAX_SAFE_INTEGER, 'START_BLOCK'),
+    confirmations: parseIntWithBounds(process.env.CONFIRMATIONS, 2, 0, 100, 'CONFIRMATIONS'),
   },
 
   // Health check settings
   health: {
     enabled: process.env.HEALTH_CHECK_ENABLED !== 'false',
-    port: parseInt(process.env.HEALTH_CHECK_PORT || '3000'),
-    maxBlocksBehind: parseInt(process.env.HEALTH_MAX_BLOCKS_BEHIND || '100'),
+    port: parseIntWithBounds(process.env.HEALTH_CHECK_PORT, 8080, 1, 65535, 'HEALTH_CHECK_PORT'),
+    maxBlocksBehind: parseIntWithBounds(process.env.HEALTH_MAX_BLOCKS_BEHIND, 100, 1, 10000, 'HEALTH_MAX_BLOCKS_BEHIND'),
   },
 
   // RPC rate limiting
   rateLimit: {
-    requestsPerWindow: parseInt(process.env.RATE_LIMIT_REQUESTS || '50'),
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '1000'),
+    requestsPerWindow: parseIntWithBounds(process.env.RATE_LIMIT_REQUESTS, 50, 1, 1000, 'RATE_LIMIT_REQUESTS'),
+    windowMs: parseIntWithBounds(process.env.RATE_LIMIT_WINDOW_MS, 1000, 100, 60000, 'RATE_LIMIT_WINDOW_MS'),
   },
 
   // Caching
   cache: {
-    timestampCacheSize: parseInt(process.env.TIMESTAMP_CACHE_SIZE || '1000'),
+    timestampCacheSize: parseIntWithBounds(process.env.TIMESTAMP_CACHE_SIZE, 1000, 10, 100000, 'TIMESTAMP_CACHE_SIZE'),
   },
 
   // Retry settings for resilience
   retry: {
-    maxRetries: parseInt(process.env.RETRY_MAX_RETRIES || '5'),
-    baseDelayMs: parseInt(process.env.RETRY_BASE_DELAY_MS || '1000'),
-    maxDelayMs: parseInt(process.env.RETRY_MAX_DELAY_MS || '60000'),
+    maxRetries: parseIntWithBounds(process.env.RETRY_MAX_RETRIES, 5, 1, 20, 'RETRY_MAX_RETRIES'),
+    baseDelayMs: parseIntWithBounds(process.env.RETRY_BASE_DELAY_MS, 1000, 100, 30000, 'RETRY_BASE_DELAY_MS'),
+    maxDelayMs: parseIntWithBounds(process.env.RETRY_MAX_DELAY_MS, 60000, 1000, 300000, 'RETRY_MAX_DELAY_MS'),
     // After this many consecutive failures, log at error level
-    errorThreshold: parseInt(process.env.RETRY_ERROR_THRESHOLD || '3'),
+    errorThreshold: parseIntWithBounds(process.env.RETRY_ERROR_THRESHOLD, 3, 1, 10, 'RETRY_ERROR_THRESHOLD'),
   },
 };
 
@@ -82,3 +103,15 @@ function validateConfig(): void {
 }
 
 validateConfig();
+
+// Deep freeze config to prevent accidental runtime mutations
+function deepFreeze<T extends object>(obj: T): T {
+  Object.freeze(obj);
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === 'object') {
+      deepFreeze(value);
+    }
+  }
+  return obj;
+}
+deepFreeze(config);

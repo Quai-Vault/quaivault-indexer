@@ -161,6 +161,33 @@ class SupabaseService {
     return addresses;
   }
 
+  /**
+   * Stream wallet addresses using an async generator.
+   * More memory-efficient for very large datasets (10k+ wallets).
+   * Yields addresses one page at a time without loading all into memory.
+   */
+  async *getAllWalletAddressesIterator(): AsyncGenerator<string> {
+    const PAGE_SIZE = 1000;
+    let offset = 0;
+
+    while (true) {
+      const { data, error } = await this.client
+        .from('wallets')
+        .select('address')
+        .range(offset, offset + PAGE_SIZE - 1);
+
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+
+      for (const wallet of data) {
+        yield wallet.address;
+      }
+
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+  }
+
   async updateWalletThreshold(address: string, threshold: number): Promise<void> {
     const normalizedAddress = validateAndNormalizeAddress(address, 'address');
 
@@ -640,7 +667,7 @@ class SupabaseService {
   async updateDailyLimitSpent(
     walletAddress: string,
     remainingLimit: string
-  ): Promise<void> {
+  ): Promise<{ updated: boolean }> {
     const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
 
     // Get the current daily limit to calculate spent amount
@@ -651,7 +678,11 @@ class SupabaseService {
       .single();
 
     if (fetchError && fetchError.code !== 'PGRST116') throw fetchError;
-    if (!data) return; // No daily limit configured for this wallet
+    if (!data) {
+      // No daily limit configured for this wallet - this is expected for wallets
+      // without the DailyLimit module enabled
+      return { updated: false };
+    }
 
     // Calculate spent: daily_limit - remaining_limit
     // Guard against underflow if remaining > dailyLimit (e.g., limit was increased mid-day)
@@ -665,6 +696,7 @@ class SupabaseService {
       .eq('wallet_address', normalizedWallet);
 
     if (error) throw error;
+    return { updated: true };
   }
 
   // ============================================

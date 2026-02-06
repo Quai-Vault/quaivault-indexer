@@ -79,7 +79,7 @@ export function loadE2EConfig(): E2EConfig {
     supabaseSchema: process.env.SUPABASE_SCHEMA || 'dev',
 
     // Health check
-    healthCheckPort: parseInt(process.env.HEALTH_CHECK_PORT || '3000', 10),
+    healthCheckPort: parseInt(process.env.HEALTH_CHECK_PORT || '8080', 10),
 
     // Timing
     indexerPollInterval: parseInt(process.env.INDEXER_POLL_INTERVAL || '15000', 10),

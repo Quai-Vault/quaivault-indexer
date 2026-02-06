@@ -1,29 +1,22 @@
 -- ============================================
--- Quai Multisig Indexer - Database Schema
+-- QuaiVault Indexer - Database Schema
 -- ============================================
 --
--- This file provides functions to create and manage network-specific schemas.
--- Each network (testnet, mainnet) gets its own isolated schema.
+-- Complete schema with Zodiac IAvatar support for module execution tracking.
+-- This file creates all required types, tables, indexes, triggers,
+-- RLS policies, permissions, and realtime subscriptions.
 --
 -- USAGE:
---   1. Run this entire file in Supabase SQL Editor (creates the functions)
---   2. Create your network schema(s):
---      SELECT create_network_schema('testnet');
---      SELECT create_network_schema('mainnet');
---
--- RESET A SCHEMA (WARNING: Deletes all data):
---   SELECT drop_network_schema('testnet');
---   SELECT create_network_schema('testnet');
+--   1. Run this entire file in Supabase SQL Editor
+--   2. Create your schema: SELECT create_network_schema('testnet');
+--   3. Expose schema to API (see bottom of file)
 --
 -- ============================================
 
--- Note: We use gen_random_uuid() which is built into PostgreSQL 13+
--- No extensions required for UUID generation
-
 -- ============================================
--- ENUM TYPES (Shared across all schemas)
+-- BASE ENUM TYPES (created in public schema)
 -- ============================================
--- Create ENUMs in public schema if they don't exist
+-- These must exist before tables can reference them
 
 DO $$
 BEGIN
@@ -31,24 +24,20 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'transaction_status') THEN
         CREATE TYPE public.transaction_status AS ENUM ('pending', 'executed', 'cancelled');
     END IF;
+END
+$$;
 
-    -- Transaction type enum
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'transaction_type') THEN
-        CREATE TYPE public.transaction_type AS ENUM (
-            'transfer',
-            'module_config',
-            'wallet_admin',
-            'recovery_setup',
-            'external_call',
-            'unknown'
-        );
-    END IF;
-
-    -- Recovery status enum (same values as transaction_status but separate type for clarity)
+DO $$
+BEGIN
+    -- Recovery status enum
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'recovery_status') THEN
         CREATE TYPE public.recovery_status AS ENUM ('pending', 'executed', 'cancelled');
     END IF;
+END
+$$;
 
+DO $$
+BEGIN
     -- Module type enum
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'module_type') THEN
         CREATE TYPE public.module_type AS ENUM ('daily_limit', 'whitelist', 'social_recovery');
@@ -56,17 +45,70 @@ BEGIN
 END
 $$;
 
--- ============================================
--- SCHEMA MANAGEMENT FUNCTIONS
--- ============================================
+DO $$
+BEGIN
+    -- Transaction type enum (includes Zodiac types)
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'transaction_type') THEN
+        CREATE TYPE public.transaction_type AS ENUM (
+            'transfer',
+            'module_config',
+            'wallet_admin',
+            'recovery_setup',
+            'external_call',
+            'unknown',
+            'module_execution',
+            'batched_call'
+        );
+    END IF;
+END
+$$;
 
--- Drop a network schema and all its data
--- WARNING: This is destructive and cannot be undone!
+-- ============================================
+-- ADD ZODIAC ENUM VALUES (if enum already exists)
+-- ============================================
+-- Add new transaction types for Zodiac module execution tracking
+
+DO $$
+BEGIN
+    -- Add 'module_execution' to transaction_type enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'module_execution'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_type')
+    ) THEN
+        ALTER TYPE public.transaction_type ADD VALUE 'module_execution';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Add 'batched_call' to transaction_type enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'batched_call'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_type')
+    ) THEN
+        ALTER TYPE public.transaction_type ADD VALUE 'batched_call';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+-- ============================================
+-- DROP NETWORK SCHEMA FUNCTION
+-- ============================================
+-- Use this to completely remove a schema and all its data
+
 CREATE OR REPLACE FUNCTION drop_network_schema(network_name TEXT)
 RETURNS void AS $$
+DECLARE
+    schema_name TEXT := network_name;
 BEGIN
-    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', network_name);
-    RAISE NOTICE 'Schema "%" dropped', network_name;
+    -- Drop the entire schema cascade (removes all tables, functions, etc.)
+    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', schema_name);
+    RAISE NOTICE 'Schema "%" dropped successfully', schema_name;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -115,7 +157,7 @@ BEGIN
             UNIQUE(wallet_address, owner_address, added_at_block)
         )', schema_name, schema_name);
 
-    -- Transactions
+    -- Transactions (with executed_by column for tracking executor)
     EXECUTE format('
         CREATE TABLE IF NOT EXISTS %I.transactions (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -133,6 +175,7 @@ BEGIN
             submitted_at_tx TEXT NOT NULL,
             executed_at_block BIGINT,
             executed_at_tx TEXT,
+            executed_by TEXT,
             cancelled_at_block BIGINT,
             cancelled_at_tx TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -252,6 +295,26 @@ BEGIN
         )', schema_name, schema_name);
 
     -- ============================================
+    -- ZODIAC MODULE EXECUTIONS TABLE
+    -- ============================================
+    -- Tracks ExecutionFromModuleSuccess and ExecutionFromModuleFailure events
+
+    EXECUTE format('
+        CREATE TABLE IF NOT EXISTS %I.module_executions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            wallet_address TEXT NOT NULL REFERENCES %I.wallets(address) ON DELETE CASCADE,
+            module_address TEXT NOT NULL,
+            success BOOLEAN NOT NULL,
+            operation_type SMALLINT,
+            to_address TEXT,
+            value TEXT,
+            data_hash TEXT,
+            executed_at_block BIGINT NOT NULL,
+            executed_at_tx TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )', schema_name, schema_name);
+
+    -- ============================================
     -- SOCIAL RECOVERY MODULE TABLES
     -- ============================================
 
@@ -346,6 +409,11 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recoveries_wallet ON %I.social_recoveries(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recoveries_pending ON %I.social_recoveries(wallet_address) WHERE status = ''pending''', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_approvals_recovery ON %I.social_recovery_approvals(wallet_address, recovery_hash)', schema_name);
+
+    -- Zodiac module_executions indexes
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_module_executions_wallet ON %I.module_executions(wallet_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_module_executions_module ON %I.module_executions(module_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_module_executions_success ON %I.module_executions(wallet_address, success)', schema_name);
 
     -- ============================================
     -- FUNCTIONS & TRIGGERS
@@ -447,6 +515,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.daily_limit_state ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.whitelist_entries ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.module_transactions ENABLE ROW LEVEL SECURITY', schema_name);
+    EXECUTE format('ALTER TABLE %I.module_executions ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.social_recovery_configs ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.social_recovery_guardians ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.social_recoveries ENABLE ROW LEVEL SECURITY', schema_name);
@@ -472,6 +541,8 @@ BEGIN
     EXECUTE format('CREATE POLICY "Public read access" ON %I.whitelist_entries FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.module_transactions', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.module_transactions FOR SELECT USING (true)', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.module_executions', schema_name);
+    EXECUTE format('CREATE POLICY "Public read access" ON %I.module_executions FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.social_recovery_configs', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.social_recovery_configs FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.social_recovery_guardians', schema_name);
@@ -483,35 +554,37 @@ BEGIN
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.indexer_state', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.indexer_state FOR SELECT USING (true)', schema_name);
 
-    -- Service role write policies
+    -- Service role write policies (with WITH CHECK for INSERT/UPDATE)
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.wallets', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.wallets FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.wallets FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.wallet_owners', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.wallet_owners FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.wallet_owners FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.transactions', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.transactions FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.transactions FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.confirmations', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.confirmations FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.confirmations FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.wallet_modules', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.wallet_modules FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.wallet_modules FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.deposits', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.deposits FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.deposits FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.daily_limit_state', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.daily_limit_state FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.daily_limit_state FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.whitelist_entries', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.whitelist_entries FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.whitelist_entries FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.module_transactions', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.module_transactions FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.module_transactions FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.module_executions', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.module_executions FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.social_recovery_configs', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recovery_configs FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recovery_configs FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.social_recovery_guardians', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recovery_guardians FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recovery_guardians FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.social_recoveries', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recoveries FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recoveries FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.social_recovery_approvals', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recovery_approvals FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recovery_approvals FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.indexer_state', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.indexer_state FOR ALL USING (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.indexer_state FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
 
     -- ============================================
     -- GRANT PERMISSIONS
@@ -564,6 +637,16 @@ BEGIN
     END;
 
     BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.module_executions', schema_name);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+
+    BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.module_transactions', schema_name);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+
+    BEGIN
         EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.social_recoveries', schema_name);
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
@@ -593,6 +676,11 @@ BEGIN
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
 
+    BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.indexer_state', schema_name);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+
     RAISE NOTICE 'Schema "%" created successfully with all tables, indexes, triggers, policies, permissions, and realtime', schema_name;
 END;
 $$ LANGUAGE plpgsql;
@@ -601,21 +689,24 @@ $$ LANGUAGE plpgsql;
 -- USAGE EXAMPLES
 -- ============================================
 --
--- STEP 1: Run this entire file to create the functions
+-- STEP 1: Run this entire file in Supabase SQL Editor
+--   (This creates the enum types and helper functions)
 --
--- STEP 2: Create network schemas
---   SELECT create_network_schema('testnet');
---   SELECT create_network_schema('mainnet');
+-- STEP 2: Create your network schema
+--   SELECT create_network_schema('testnet');  -- For testnet
+--   SELECT create_network_schema('mainnet');  -- For mainnet
 --
--- STEP 3: IMPORTANT - Expose schemas to Supabase API
---   By default, Supabase only exposes 'public'. You must expose custom schemas:
---
+-- STEP 3: CRITICAL - Expose schema to PostgREST API
 --   ALTER ROLE authenticator SET pgrst.db_schemas TO 'public, graphql_public, testnet, mainnet';
 --   NOTIFY pgrst, 'reload config';
 --
---   Or go to: Project Settings → API → Exposed Schemas → add 'testnet, mainnet'
+-- STEP 4: Verify schema is exposed (should show your schemas)
+--   SELECT rolname, rolconfig FROM pg_roles WHERE rolname = 'authenticator';
 --
--- RESET A SCHEMA (deletes all data, then recreates):
+-- STEP 5: Verify tables were created
+--   SELECT table_name FROM information_schema.tables WHERE table_schema = 'testnet' ORDER BY table_name;
+--
+-- RESET A SCHEMA (WARNING: deletes all data!):
 --   SELECT drop_network_schema('testnet');
 --   SELECT create_network_schema('testnet');
 --
@@ -630,3 +721,10 @@ $$ LANGUAGE plpgsql;
 --   SELECT 'testnet' as network, COUNT(*) FROM testnet.wallets
 --   UNION ALL
 --   SELECT 'mainnet' as network, COUNT(*) FROM mainnet.wallets;
+--
+-- TROUBLESHOOTING:
+--   If you get PGRST205 errors, the schema isn't exposed. Run:
+--     ALTER ROLE authenticator SET pgrst.db_schemas TO 'public, graphql_public, testnet, mainnet';
+--     NOTIFY pgrst, 'reload config';
+--   Then wait 10-15 seconds for PostgREST to reload.
+--

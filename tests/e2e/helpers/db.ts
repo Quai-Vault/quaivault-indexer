@@ -195,11 +195,13 @@ export interface SocialRecoveryApprovalRecord {
 /**
  * Create a Supabase client configured for the E2E test schema
  */
-export function createSupabaseClient(config: E2EConfig): SupabaseClient {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createSupabaseClient(config: E2EConfig): SupabaseClient<any, any, any> {
   return createClient(config.supabaseUrl, config.supabaseServiceKey, {
     auth: { persistSession: false },
     db: { schema: config.supabaseSchema },
-  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as SupabaseClient<any, any, any>;
 }
 
 /**

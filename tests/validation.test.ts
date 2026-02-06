@@ -91,10 +91,18 @@ describe('Bytes32 Validation', () => {
   });
 
   describe('validateBytes32', () => {
-    it('should return the hash unchanged for valid input', () => {
+    it('should return the hash normalized to lowercase', () => {
       const validHash =
         '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
       expect(validateBytes32(validHash, 'txHash')).toBe(validHash);
+    });
+
+    it('should normalize uppercase hashes to lowercase', () => {
+      const uppercaseHash =
+        '0x1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF';
+      const expectedLowercase =
+        '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
+      expect(validateBytes32(uppercaseHash, 'txHash')).toBe(expectedLowercase);
     });
 
     it('should throw for invalid hashes with descriptive error', () => {

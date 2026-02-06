@@ -1,8 +1,74 @@
+/**
+ * Event Handlers for QuaiVault Indexer
+ *
+ * ERROR HANDLING STRATEGY
+ * =======================
+ *
+ * 1. TOP-LEVEL ISOLATION: The handleEvent() function wraps all event dispatch
+ *    in a try-catch. Errors are logged with full context but NOT re-thrown.
+ *    This ensures one malformed event doesn't crash the entire indexer.
+ *
+ * 2. VALIDATION FIRST: All event handlers use validateEventArgs() to verify
+ *    required fields exist before processing. Missing fields throw errors
+ *    that are caught by the top-level handler.
+ *
+ * 3. DATABASE ERRORS: Supabase operations may throw on constraint violations
+ *    or connection issues. These propagate to the top-level catch and are
+ *    logged. The event is skipped, but indexing continues.
+ *
+ * 4. RPC ERRORS: Some handlers (e.g., WalletRegistered) make RPC calls.
+ *    These have their own retry logic via withRetry(). If all retries fail,
+ *    the error propagates to top-level and the event is skipped.
+ *
+ * RECOVERY BEHAVIOR
+ * =================
+ * - Skipped events are logged at ERROR level with full context
+ * - The indexer continues to the next event
+ * - Re-indexing the block range will retry failed events
+ * - Circuit breaker at poll loop level handles persistent RPC failures
+ *
+ * WHEN TO THROW vs LOG-AND-SKIP
+ * =============================
+ * - THROW: Never from handleEvent() - always let indexer continue
+ * - LOG-AND-SKIP: All errors within handleEvent() - maintains indexer liveness
+ * - Individual handlers may throw; top-level catch handles them uniformly
+ */
+
 import type { DecodedEvent } from '../types/index.js';
 import { supabase } from '../services/supabase.js';
 import { quai } from '../services/quai.js';
 import { logger } from '../utils/logger.js';
 import { decodeCalldata, getTransactionDescription } from '../services/decoder.js';
+
+// ABI decoding constants
+const ABI_CONSTANTS = {
+  MAX_ADDRESS_ARRAY_LENGTH: 1000,  // Sanity limit for decoded arrays
+  WORD_SIZE: 64,                   // Hex chars per 32-byte word
+  HEX_PREFIX_LENGTH: 2,            // "0x" prefix length
+  MIN_ARRAY_DATA_LENGTH: 130,      // 0x + offset (64) + length (64)
+  OFFSET_START: 64,                // After 0x prefix, where offset word ends
+  LENGTH_START: 64,                // Position of length word in data (after offset)
+  LENGTH_END: 128,                 // End of length word
+  ARRAY_DATA_START: 128,           // Position where array elements begin
+  ADDRESS_HEX_LENGTH: 40,          // 20 bytes = 40 hex chars
+};
+
+/**
+ * Validates that required fields exist in event args.
+ * Throws a descriptive error if any field is missing.
+ */
+function validateEventArgs<T extends Record<string, unknown>>(
+  args: Record<string, unknown>,
+  requiredFields: (keyof T)[],
+  eventName: string
+): T {
+  for (const field of requiredFields) {
+    if (args[field as string] === undefined) {
+      throw new Error(`Missing required field "${String(field)}" in ${eventName} event`);
+    }
+  }
+  return args as T;
+}
 
 export async function handleEvent(event: DecodedEvent): Promise<void> {
   try {
@@ -103,9 +169,23 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
       default:
         logger.debug({ event: event.name }, 'Unhandled event');
     }
-  } catch (error) {
-    logger.error({ error, event }, 'Error handling event');
-    throw error;
+  } catch (err) {
+    // Log error with event context but DON'T re-throw
+    // This allows the indexer to continue processing other events
+    // Use 'err' property - pino auto-serializes Error objects with this key
+    logger.error(
+      {
+        err,
+        event: {
+          name: event.name,
+          address: event.address,
+          blockNumber: event.blockNumber,
+          transactionHash: event.transactionHash,
+        },
+      },
+      'Error handling event - skipping'
+    );
+    // Don't re-throw: let indexer continue with remaining events
   }
 }
 
@@ -114,11 +194,11 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
 // ============================================
 
 async function handleWalletCreated(event: DecodedEvent): Promise<void> {
-  const { wallet, owners, threshold } = event.args as {
+  const { wallet, owners, threshold } = validateEventArgs<{
     wallet: string;
     owners: string[];
     threshold: string;
-  };
+  }>(event.args, ['wallet', 'owners', 'threshold'], 'WalletCreated');
 
   // Index the wallet
   await supabase.upsertWallet({
@@ -144,10 +224,10 @@ async function handleWalletCreated(event: DecodedEvent): Promise<void> {
 }
 
 async function handleWalletRegistered(event: DecodedEvent): Promise<void> {
-  const { wallet } = event.args as {
+  const { wallet } = validateEventArgs<{
     wallet: string;
     registrar: string;
-  };
+  }>(event.args, ['wallet'], 'WalletRegistered');
 
   try {
     // Query the wallet contract to get owners and threshold using direct RPC calls
@@ -182,13 +262,24 @@ async function handleWalletRegistered(event: DecodedEvent): Promise<void> {
     );
 
     logger.info({ wallet, owners: ownerAddresses.length, threshold: thresholdValue }, 'Wallet registered');
-  } catch (error) {
-    logger.error({ error, wallet }, 'Failed to query wallet contract during registration');
-    throw error;
+  } catch (err) {
+    logger.error({ err, wallet }, 'Failed to query wallet contract during registration');
+    throw err;
   }
 }
 
-// Helper to decode address array from ABI-encoded response
+/**
+ * Decodes an ABI-encoded address array from a contract call response.
+ *
+ * ABI encoding layout for dynamic address[]:
+ * - Bytes 0-31 (offset): Pointer to start of array data (always 0x20 = 32 for single return)
+ * - Bytes 32-63 (length): Number of addresses in the array
+ * - Bytes 64+: Each address padded to 32 bytes (right-aligned, left-padded with zeros)
+ *
+ * @param hexData - The 0x-prefixed hex string from quai_call response
+ * @returns Array of lowercase address strings
+ * @throws Error if data is malformed or unreasonably large
+ */
 function decodeAddressArray(hexData: string): string[] {
   // Validate input
   if (!hexData || typeof hexData !== 'string') {
@@ -200,18 +291,21 @@ function decodeAddressArray(hexData: string): string[] {
   }
 
   // Minimum length: 0x (2) + offset (64) + length (64) = 130 chars
-  if (hexData.length < 130) {
-    throw new Error(`Invalid ABI-encoded address array: data too short (${hexData.length} chars, need at least 130)`);
+  if (hexData.length < ABI_CONSTANTS.MIN_ARRAY_DATA_LENGTH) {
+    throw new Error(
+      `Invalid ABI-encoded address array: data too short (${hexData.length} chars, need at least ${ABI_CONSTANTS.MIN_ARRAY_DATA_LENGTH})`
+    );
   }
 
-  // Skip 0x prefix and first 64 chars (offset to array data)
-  const data = hexData.slice(2);
-  // Get array length (next 64 chars = 32 bytes)
-  const lengthHex = data.slice(64, 128);
+  // Skip 0x prefix
+  const data = hexData.slice(ABI_CONSTANTS.HEX_PREFIX_LENGTH);
+
+  // Get array length (bytes 32-63 = chars 64-128)
+  const lengthHex = data.slice(ABI_CONSTANTS.LENGTH_START, ABI_CONSTANTS.LENGTH_END);
   const length = parseInt(lengthHex, 16);
 
   // Sanity check on length
-  if (isNaN(length) || length < 0 || length > 1000) {
+  if (isNaN(length) || length < 0 || length > ABI_CONSTANTS.MAX_ADDRESS_ARRAY_LENGTH) {
     throw new Error(`Invalid ABI-encoded address array: unreasonable length ${length}`);
   }
 
@@ -221,18 +315,20 @@ function decodeAddressArray(hexData: string): string[] {
   }
 
   // Validate we have enough data for all addresses
-  const expectedLength = 128 + (length * 64);
+  const expectedLength = ABI_CONSTANTS.ARRAY_DATA_START + (length * ABI_CONSTANTS.WORD_SIZE);
   if (data.length < expectedLength) {
-    throw new Error(`Invalid ABI-encoded address array: expected ${expectedLength} chars for ${length} addresses, got ${data.length}`);
+    throw new Error(
+      `Invalid ABI-encoded address array: expected ${expectedLength} chars for ${length} addresses, got ${data.length}`
+    );
   }
 
   const addresses: string[] = [];
   for (let i = 0; i < length; i++) {
-    // Each address is 32 bytes (64 chars), right-padded
-    const start = 128 + (i * 64);
-    const addressHex = data.slice(start, start + 64);
+    // Each address is 32 bytes (64 chars), right-aligned in the word
+    const start = ABI_CONSTANTS.ARRAY_DATA_START + (i * ABI_CONSTANTS.WORD_SIZE);
+    const addressHex = data.slice(start, start + ABI_CONSTANTS.WORD_SIZE);
     // Take last 40 chars (20 bytes) as the address
-    const address = '0x' + addressHex.slice(-40);
+    const address = '0x' + addressHex.slice(-ABI_CONSTANTS.ADDRESS_HEX_LENGTH);
     addresses.push(address);
   }
   return addresses;
@@ -243,13 +339,13 @@ function decodeAddressArray(hexData: string): string[] {
 // ============================================
 
 async function handleTransactionProposed(event: DecodedEvent): Promise<void> {
-  const { txHash, proposer, to, value, data } = event.args as {
+  const { txHash, proposer, to, value, data } = validateEventArgs<{
     txHash: string;
     proposer: string;
     to: string;
     value: string;
     data: string;
-  };
+  }>(event.args, ['txHash', 'proposer', 'to', 'value', 'data'], 'TransactionProposed');
 
   // Decode the calldata to determine transaction type
   const decoded = decodeCalldata(to, data || '0x', value);
@@ -285,10 +381,10 @@ async function handleTransactionProposed(event: DecodedEvent): Promise<void> {
 }
 
 async function handleTransactionApproved(event: DecodedEvent): Promise<void> {
-  const { txHash, approver } = event.args as {
+  const { txHash, approver } = validateEventArgs<{
     txHash: string;
     approver: string;
-  };
+  }>(event.args, ['txHash', 'approver'], 'TransactionApproved');
 
   await supabase.addConfirmation({
     walletAddress: event.address,
@@ -306,10 +402,10 @@ async function handleTransactionApproved(event: DecodedEvent): Promise<void> {
 }
 
 async function handleApprovalRevoked(event: DecodedEvent): Promise<void> {
-  const { txHash, owner } = event.args as {
+  const { txHash, owner } = validateEventArgs<{
     txHash: string;
     owner: string;
-  };
+  }>(event.args, ['txHash', 'owner'], 'ApprovalRevoked');
 
   await supabase.revokeConfirmation(
     event.address,
@@ -326,7 +422,10 @@ async function handleApprovalRevoked(event: DecodedEvent): Promise<void> {
 }
 
 async function handleTransactionExecuted(event: DecodedEvent): Promise<void> {
-  const { txHash, executor } = event.args as { txHash: string; executor: string };
+  const { txHash, executor } = validateEventArgs<{
+    txHash: string;
+    executor: string;
+  }>(event.args, ['txHash', 'executor'], 'TransactionExecuted');
 
   await supabase.updateTransactionStatus(
     event.address,
@@ -344,7 +443,10 @@ async function handleTransactionExecuted(event: DecodedEvent): Promise<void> {
 }
 
 async function handleTransactionCancelled(event: DecodedEvent): Promise<void> {
-  const { txHash, canceller } = event.args as { txHash: string; canceller: string };
+  const { txHash, canceller } = validateEventArgs<{
+    txHash: string;
+    canceller: string;
+  }>(event.args, ['txHash', 'canceller'], 'TransactionCancelled');
 
   await supabase.updateTransactionStatus(
     event.address,
@@ -361,7 +463,9 @@ async function handleTransactionCancelled(event: DecodedEvent): Promise<void> {
 }
 
 async function handleOwnerAdded(event: DecodedEvent): Promise<void> {
-  const { owner } = event.args as { owner: string };
+  const { owner } = validateEventArgs<{
+    owner: string;
+  }>(event.args, ['owner'], 'OwnerAdded');
 
   await supabase.addOwner({
     walletAddress: event.address,
@@ -377,7 +481,9 @@ async function handleOwnerAdded(event: DecodedEvent): Promise<void> {
 }
 
 async function handleOwnerRemoved(event: DecodedEvent): Promise<void> {
-  const { owner } = event.args as { owner: string };
+  const { owner } = validateEventArgs<{
+    owner: string;
+  }>(event.args, ['owner'], 'OwnerRemoved');
 
   await supabase.removeOwner(
     event.address,
@@ -392,7 +498,9 @@ async function handleOwnerRemoved(event: DecodedEvent): Promise<void> {
 }
 
 async function handleThresholdChanged(event: DecodedEvent): Promise<void> {
-  const { threshold } = event.args as { threshold: string };
+  const { threshold } = validateEventArgs<{
+    threshold: string;
+  }>(event.args, ['threshold'], 'ThresholdChanged');
 
   await supabase.updateWalletThreshold(event.address, parseInt(threshold));
 
@@ -400,7 +508,9 @@ async function handleThresholdChanged(event: DecodedEvent): Promise<void> {
 }
 
 async function handleModuleEnabled(event: DecodedEvent): Promise<void> {
-  const { module } = event.args as { module: string };
+  const { module } = validateEventArgs<{
+    module: string;
+  }>(event.args, ['module'], 'ModuleEnabled');
 
   await supabase.addModule({
     walletAddress: event.address,
@@ -414,7 +524,9 @@ async function handleModuleEnabled(event: DecodedEvent): Promise<void> {
 }
 
 async function handleModuleDisabled(event: DecodedEvent): Promise<void> {
-  const { module } = event.args as { module: string };
+  const { module } = validateEventArgs<{
+    module: string;
+  }>(event.args, ['module'], 'ModuleDisabled');
 
   await supabase.disableModule(
     event.address,
@@ -427,10 +539,10 @@ async function handleModuleDisabled(event: DecodedEvent): Promise<void> {
 }
 
 async function handleReceived(event: DecodedEvent): Promise<void> {
-  const { sender, amount } = event.args as {
+  const { sender, amount } = validateEventArgs<{
     sender: string;
     amount: string;
-  };
+  }>(event.args, ['sender', 'amount'], 'Received');
 
   await supabase.addDeposit({
     walletAddress: event.address,
@@ -451,12 +563,12 @@ async function handleReceived(event: DecodedEvent): Promise<void> {
 // ============================================
 
 async function handleRecoverySetup(event: DecodedEvent): Promise<void> {
-  const { wallet, guardians, threshold, recoveryPeriod } = event.args as {
+  const { wallet, guardians, threshold, recoveryPeriod } = validateEventArgs<{
     wallet: string;
     guardians: string[];
     threshold: string;
     recoveryPeriod: string;
-  };
+  }>(event.args, ['wallet', 'guardians', 'threshold', 'recoveryPeriod'], 'RecoverySetup');
 
   await supabase.upsertRecoveryConfig({
     walletAddress: wallet,
@@ -474,14 +586,13 @@ async function handleRecoverySetup(event: DecodedEvent): Promise<void> {
 }
 
 async function handleRecoveryInitiated(event: DecodedEvent): Promise<void> {
-  const { wallet, recoveryHash, newOwners, newThreshold, initiator } =
-    event.args as {
-      wallet: string;
-      recoveryHash: string;
-      newOwners: string[];
-      newThreshold: string;
-      initiator: string;
-    };
+  const { wallet, recoveryHash, newOwners, newThreshold, initiator } = validateEventArgs<{
+    wallet: string;
+    recoveryHash: string;
+    newOwners: string[];
+    newThreshold: string;
+    initiator: string;
+  }>(event.args, ['wallet', 'recoveryHash', 'newOwners', 'newThreshold', 'initiator'], 'RecoveryInitiated');
 
   // Get current recovery config for threshold
   const config = await supabase.getRecoveryConfig(wallet);
@@ -523,11 +634,11 @@ async function handleRecoveryInitiated(event: DecodedEvent): Promise<void> {
 }
 
 async function handleRecoveryApproved(event: DecodedEvent): Promise<void> {
-  const { wallet, recoveryHash, guardian } = event.args as {
+  const { wallet, recoveryHash, guardian } = validateEventArgs<{
     wallet: string;
     recoveryHash: string;
     guardian: string;
-  };
+  }>(event.args, ['wallet', 'recoveryHash', 'guardian'], 'RecoveryApproved');
 
   await supabase.addRecoveryApproval({
     walletAddress: wallet,
@@ -547,11 +658,11 @@ async function handleRecoveryApproved(event: DecodedEvent): Promise<void> {
 async function handleRecoveryApprovalRevoked(
   event: DecodedEvent
 ): Promise<void> {
-  const { wallet, recoveryHash, guardian } = event.args as {
+  const { wallet, recoveryHash, guardian } = validateEventArgs<{
     wallet: string;
     recoveryHash: string;
     guardian: string;
-  };
+  }>(event.args, ['wallet', 'recoveryHash', 'guardian'], 'RecoveryApprovalRevoked');
 
   await supabase.revokeRecoveryApproval(
     wallet,
@@ -568,10 +679,10 @@ async function handleRecoveryApprovalRevoked(
 }
 
 async function handleRecoveryExecuted(event: DecodedEvent): Promise<void> {
-  const { wallet, recoveryHash } = event.args as {
+  const { wallet, recoveryHash } = validateEventArgs<{
     wallet: string;
     recoveryHash: string;
-  };
+  }>(event.args, ['wallet', 'recoveryHash'], 'RecoveryExecuted');
 
   await supabase.updateRecoveryStatus(
     wallet,
@@ -588,10 +699,10 @@ async function handleRecoveryExecuted(event: DecodedEvent): Promise<void> {
 }
 
 async function handleRecoveryCancelled(event: DecodedEvent): Promise<void> {
-  const { wallet, recoveryHash } = event.args as {
+  const { wallet, recoveryHash } = validateEventArgs<{
     wallet: string;
     recoveryHash: string;
-  };
+  }>(event.args, ['wallet', 'recoveryHash'], 'RecoveryCancelled');
 
   await supabase.updateRecoveryStatus(
     wallet,
@@ -612,10 +723,10 @@ async function handleRecoveryCancelled(event: DecodedEvent): Promise<void> {
 // ============================================
 
 async function handleDailyLimitSet(event: DecodedEvent): Promise<void> {
-  const { wallet, limit } = event.args as {
+  const { wallet, limit } = validateEventArgs<{
     wallet: string;
     limit: string;
-  };
+  }>(event.args, ['wallet', 'limit'], 'DailyLimitSet');
 
   await supabase.upsertDailyLimit({
     walletAddress: wallet,
@@ -628,7 +739,9 @@ async function handleDailyLimitSet(event: DecodedEvent): Promise<void> {
 }
 
 async function handleDailyLimitReset(event: DecodedEvent): Promise<void> {
-  const { wallet } = event.args as { wallet: string };
+  const { wallet } = validateEventArgs<{
+    wallet: string;
+  }>(event.args, ['wallet'], 'DailyLimitReset');
 
   await supabase.resetDailyLimit(wallet);
 
@@ -640,11 +753,11 @@ async function handleDailyLimitReset(event: DecodedEvent): Promise<void> {
 // ============================================
 
 async function handleAddressWhitelisted(event: DecodedEvent): Promise<void> {
-  const { wallet, addr, limit } = event.args as {
+  const { wallet, addr, limit } = validateEventArgs<{
     wallet: string;
     addr: string;
     limit: string;
-  };
+  }>(event.args, ['wallet', 'addr', 'limit'], 'AddressWhitelisted');
 
   await supabase.addWhitelistEntry({
     walletAddress: wallet,
@@ -664,10 +777,10 @@ async function handleAddressWhitelisted(event: DecodedEvent): Promise<void> {
 async function handleAddressRemovedFromWhitelist(
   event: DecodedEvent
 ): Promise<void> {
-  const { wallet, addr } = event.args as {
+  const { wallet, addr } = validateEventArgs<{
     wallet: string;
     addr: string;
-  };
+  }>(event.args, ['wallet', 'addr'], 'AddressRemovedFromWhitelist');
 
   await supabase.removeWhitelistEntry(
     wallet,
@@ -685,11 +798,11 @@ async function handleAddressRemovedFromWhitelist(
 async function handleWhitelistTransactionExecuted(
   event: DecodedEvent
 ): Promise<void> {
-  const { wallet, to, value } = event.args as {
+  const { wallet, to, value } = validateEventArgs<{
     wallet: string;
     to: string;
     value: string;
-  };
+  }>(event.args, ['wallet', 'to', 'value'], 'WhitelistTransactionExecuted');
 
   await supabase.addModuleTransaction({
     walletAddress: wallet,
@@ -710,12 +823,12 @@ async function handleWhitelistTransactionExecuted(
 async function handleDailyLimitTransactionExecuted(
   event: DecodedEvent
 ): Promise<void> {
-  const { wallet, to, value, remainingLimit } = event.args as {
+  const { wallet, to, value, remainingLimit } = validateEventArgs<{
     wallet: string;
     to: string;
     value: string;
     remainingLimit: string;
-  };
+  }>(event.args, ['wallet', 'to', 'value', 'remainingLimit'], 'DailyLimitTransactionExecuted');
 
   await supabase.addModuleTransaction({
     walletAddress: wallet,
@@ -742,7 +855,9 @@ async function handleDailyLimitTransactionExecuted(
 // ============================================
 
 async function handleExecutionFromModuleSuccess(event: DecodedEvent): Promise<void> {
-  const { module } = event.args as { module: string };
+  const { module } = validateEventArgs<{
+    module: string;
+  }>(event.args, ['module'], 'ExecutionFromModuleSuccess');
 
   await supabase.addModuleExecution({
     walletAddress: event.address,
@@ -759,7 +874,9 @@ async function handleExecutionFromModuleSuccess(event: DecodedEvent): Promise<vo
 }
 
 async function handleExecutionFromModuleFailure(event: DecodedEvent): Promise<void> {
-  const { module } = event.args as { module: string };
+  const { module } = validateEventArgs<{
+    module: string;
+  }>(event.args, ['module'], 'ExecutionFromModuleFailure');
 
   await supabase.addModuleExecution({
     walletAddress: event.address,

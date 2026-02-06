@@ -16,18 +16,33 @@ import { withRetry, RetryTracker } from './utils/retry.js';
 // Maximum addresses per getLogs call to avoid RPC limits
 const GET_LOGS_ADDRESS_CHUNK_SIZE = 100;
 
+// Circuit breaker configuration
+const CIRCUIT_BREAKER = {
+  failureThreshold: 10,    // Open circuit after this many consecutive failures
+  cooldownMs: 60000,       // Wait 1 minute before retrying after circuit opens
+};
+
 export class Indexer {
   private isRunning = false;
   // Set of lowercase wallet addresses for tracking
   private trackedWallets: Set<string> = new Set();
   // Retry tracker for poll loop resilience
   private pollRetryTracker = new RetryTracker();
+  // Circuit breaker state
+  private circuitBreaker = {
+    failures: 0,
+    isOpen: false,
+    openUntil: 0,
+  };
 
   async start(): Promise<void> {
     logger.info('Starting indexer...');
 
     // Start health check server
     await health.start();
+
+    // Wait for RPC connection before proceeding
+    await this.waitForRpcConnection();
 
     // Load tracked wallets (lowercase for consistency)
     const wallets = await supabase.getAllWalletAddresses();
@@ -221,14 +236,24 @@ export class Indexer {
 
   private async poll(): Promise<void> {
     while (this.isRunning) {
+      // Check circuit breaker before attempting
+      if (!this.checkCircuitBreaker()) {
+        const waitTime = this.circuitBreaker.openUntil - Date.now();
+        logger.debug({ waitMs: waitTime }, 'Circuit breaker open, waiting');
+        await this.sleep(Math.min(waitTime, config.indexer.pollInterval));
+        continue;
+      }
+
       try {
         await this.pollOnce();
         this.pollRetryTracker.recordSuccess();
+        this.recordCircuitBreakerSuccess();
       } catch (error) {
         const retryDelay = this.pollRetryTracker.recordFailure(
           error as Error,
           'poll'
         );
+        this.recordCircuitBreakerFailure();
 
         // If exhausted, log critical and reset (keep trying but ops should investigate)
         if (this.pollRetryTracker.isExhausted()) {
@@ -270,14 +295,17 @@ export class Indexer {
             startBlock,
             safeBlock,
             blocksToIndex,
+            walletsBeforeRefresh: this.trackedWallets.size,
+            batchSize: config.indexer.batchSize,
           },
           'Large gap detected, triggering backfill'
         );
 
-        // Reload tracked wallets (may have been cleared by database reset)
+        // Reload tracked wallets using atomic swap pattern
+        // Build new set first, then replace to avoid race condition
         const wallets = await supabase.getAllWalletAddresses();
-        this.trackedWallets.clear();
-        wallets.forEach((w) => this.trackedWallets.add(w.toLowerCase()));
+        const newSet = new Set(wallets.map((w) => w.toLowerCase()));
+        this.trackedWallets = newSet;  // Atomic swap
         health.setTrackedWalletsCount(this.trackedWallets.size);
 
         await this.backfill(startBlock, safeBlock);
@@ -290,5 +318,101 @@ export class Indexer {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Wait for RPC connection to be available before starting indexer.
+   * Retries with exponential backoff to handle temporary RPC outages at startup.
+   */
+  private async waitForRpcConnection(maxAttempts = 30, initialDelayMs = 2000): Promise<void> {
+    let delay = initialDelayMs;
+    const maxDelay = 30000; // Cap at 30 seconds between attempts
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const block = await quai.getBlockNumber();
+        logger.info({ block, attempts: attempt }, 'RPC connection established');
+        return;
+      } catch (err) {
+        const error = err as Error;
+        logger.warn(
+          {
+            attempt,
+            maxAttempts,
+            nextRetryMs: delay,
+            err: error.message
+          },
+          'Waiting for RPC connection...'
+        );
+
+        if (attempt === maxAttempts) {
+          throw new Error(
+            `Failed to connect to RPC after ${maxAttempts} attempts: ${error.message}`
+          );
+        }
+
+        await this.sleep(delay);
+        // Exponential backoff with cap
+        delay = Math.min(delay * 1.5, maxDelay);
+      }
+    }
+  }
+
+  /**
+   * Check if circuit breaker allows operation.
+   * Returns true if allowed, false if circuit is open.
+   */
+  private checkCircuitBreaker(): boolean {
+    if (this.circuitBreaker.isOpen) {
+      if (Date.now() < this.circuitBreaker.openUntil) {
+        return false; // Circuit still open, skip attempt
+      }
+      // Cooldown expired, allow retry (half-open state)
+      logger.info('Circuit breaker cooldown expired, attempting recovery');
+      this.circuitBreaker.isOpen = false;
+      this.circuitBreaker.failures = 0;
+      // Keep health service informed - still in half-open state
+      // Will be fully reset on success via recordCircuitBreakerSuccess()
+    }
+    return true;
+  }
+
+  /**
+   * Record a failure and potentially open the circuit breaker.
+   */
+  private recordCircuitBreakerFailure(): void {
+    this.circuitBreaker.failures++;
+
+    if (this.circuitBreaker.failures >= CIRCUIT_BREAKER.failureThreshold) {
+      this.circuitBreaker.isOpen = true;
+      this.circuitBreaker.openUntil = Date.now() + CIRCUIT_BREAKER.cooldownMs;
+      // Notify health service to avoid hammering RPC during health checks
+      health.setRpcCircuitBreakerOpen(true);
+      logger.warn(
+        {
+          failures: this.circuitBreaker.failures,
+          cooldownMs: CIRCUIT_BREAKER.cooldownMs,
+        },
+        'Circuit breaker opened - pausing indexer'
+      );
+    }
+  }
+
+  /**
+   * Record a success and reset circuit breaker state.
+   */
+  private recordCircuitBreakerSuccess(): void {
+    if (this.circuitBreaker.failures > 0) {
+      logger.info(
+        { previousFailures: this.circuitBreaker.failures },
+        'Circuit breaker: operation succeeded after failures'
+      );
+    }
+    this.circuitBreaker.failures = 0;
+    if (this.circuitBreaker.isOpen) {
+      // Notify health service that RPC is healthy again
+      health.setRpcCircuitBreakerOpen(false);
+    }
+    this.circuitBreaker.isOpen = false;
   }
 }

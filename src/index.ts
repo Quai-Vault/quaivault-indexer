@@ -24,9 +24,9 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(forceExitTimeout);
     logger.info('Graceful shutdown complete');
     process.exit(0);
-  } catch (error) {
+  } catch (err) {
     clearTimeout(forceExitTimeout);
-    logger.error({ error }, 'Error during shutdown');
+    logger.error({ err }, 'Error during shutdown');
     process.exit(1);
   }
 }
@@ -36,7 +36,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 // Start
-indexer.start().catch((error) => {
-  logger.error({ error }, 'Failed to start indexer');
+indexer.start().catch((err) => {
+  logger.error({ err }, 'Failed to start indexer');
   process.exit(1);
 });

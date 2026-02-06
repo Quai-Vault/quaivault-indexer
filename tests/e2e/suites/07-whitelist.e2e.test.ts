@@ -21,6 +21,8 @@ describe('WhitelistModule Events', () => {
   let whitelistedAddress: string;
   let skipAllTests = false;
 
+  // This test suite may need to enable a module which requires multiple transactions
+  // Set a longer timeout than the default 60s hookTimeout
   beforeAll(async () => {
     db = new DatabaseVerifier(supabase, e2eConfig.supabaseSchema);
 
@@ -71,7 +73,7 @@ describe('WhitelistModule Events', () => {
     }
 
     console.log(`  WhitelistModule test setup complete`);
-  });
+  }, 180000); // 3 minute timeout for enabling module + waiting for indexer
 
   it('should index AddressWhitelisted event', async () => {
     // Skip if prerequisites not met

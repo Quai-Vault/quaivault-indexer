@@ -1,4 +1,5 @@
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
+import { randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { quai } from './quai.js';
 import { supabase } from './supabase.js';
@@ -16,7 +17,23 @@ const RATE_LIMIT = {
   windowMs: 60000,           // 1 minute window
   maxRequests: 60,           // 60 requests per minute per IP
   cleanupIntervalMs: 300000, // Clean up old entries every 5 minutes
+  maxIPs: 10000,             // Cap on unique IPs tracked (prevents memory DoS)
 };
+
+// Health check timeout (prevents hanging health checks)
+// Increased to 10s to handle slow/congested RPC endpoints
+const HEALTH_CHECK_TIMEOUT_MS = 10000;
+
+/**
+ * Wraps a promise with a timeout.
+ * Rejects if the promise doesn't resolve within the specified time.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, name: string): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`${name} timeout after ${ms}ms`)), ms)
+  );
+  return Promise.race([promise, timeout]);
+}
 
 export interface HealthStatus {
   status: 'healthy' | 'unhealthy';
@@ -44,6 +61,7 @@ class HealthService {
   private server: Server | null = null;
   private trackedWalletsCount = 0;
   private isIndexerRunning = false;
+  private rpcCircuitBreakerOpen = false;
 
   // Rate limiting: Map of IP -> array of request timestamps
   private rateLimitMap: Map<string, number[]> = new Map();
@@ -55,6 +73,17 @@ class HealthService {
 
   setIndexerRunning(running: boolean): void {
     this.isIndexerRunning = running;
+  }
+
+  /**
+   * Set the RPC circuit breaker state.
+   * When open, health checks will report degraded status without hammering the RPC.
+   */
+  setRpcCircuitBreakerOpen(isOpen: boolean): void {
+    if (this.rpcCircuitBreakerOpen !== isOpen) {
+      logger.info({ isOpen }, 'RPC circuit breaker state changed');
+    }
+    this.rpcCircuitBreakerOpen = isOpen;
   }
 
   /**
@@ -80,6 +109,15 @@ class HealthService {
   private checkRateLimit(ip: string): boolean {
     const now = Date.now();
     const windowStart = now - RATE_LIMIT.windowMs;
+
+    // Enforce size cap to prevent memory DoS
+    if (this.rateLimitMap.size >= RATE_LIMIT.maxIPs && !this.rateLimitMap.has(ip)) {
+      // Evict oldest entry (first in Map iteration order)
+      const oldestIp = this.rateLimitMap.keys().next().value;
+      if (oldestIp) {
+        this.rateLimitMap.delete(oldestIp);
+      }
+    }
 
     // Get or create request history for this IP
     let requests = this.rateLimitMap.get(ip) || [];
@@ -159,33 +197,41 @@ class HealthService {
     }, RATE_LIMIT.cleanupIntervalMs);
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      // Generate unique request ID for tracing
+      const requestId = randomUUID();
       const origin = req.headers.origin;
       const corsHeaders = this.getCorsHeaders(origin);
       const clientIp = this.getClientIp(req);
 
+      // Add request ID to all responses for tracing
+      const headersWithTracing = {
+        ...corsHeaders,
+        'X-Request-Id': requestId,
+      };
+
       // Handle CORS preflight requests (don't rate limit these)
       if (req.method === 'OPTIONS') {
-        res.writeHead(204, corsHeaders);
+        res.writeHead(204, headersWithTracing);
         res.end();
         return;
       }
 
       // Apply rate limiting
       if (!this.checkRateLimit(clientIp)) {
-        logger.warn({ ip: clientIp, url: req.url }, 'Rate limit exceeded');
-        this.sendRateLimitResponse(res, corsHeaders);
+        logger.warn({ requestId, ip: clientIp, url: req.url }, 'Rate limit exceeded');
+        this.sendRateLimitResponse(res, headersWithTracing);
         return;
       }
 
       if (req.url === '/health' && req.method === 'GET') {
-        await this.handleHealthCheck(res, corsHeaders);
+        await this.handleHealthCheck(res, headersWithTracing, requestId);
       } else if (req.url === '/ready' && req.method === 'GET') {
-        await this.handleReadinessCheck(res, corsHeaders);
+        await this.handleReadinessCheck(res, headersWithTracing, requestId);
       } else if (req.url === '/live' && req.method === 'GET') {
-        this.handleLivenessCheck(res, corsHeaders);
+        this.handleLivenessCheck(res, headersWithTracing, requestId);
       } else {
-        res.writeHead(404, corsHeaders);
-        res.end(JSON.stringify({ error: 'Not found' }));
+        res.writeHead(404, headersWithTracing);
+        res.end(JSON.stringify({ error: 'Not found', requestId }));
       }
     });
 
@@ -226,15 +272,15 @@ class HealthService {
     }
   }
 
-  private async handleHealthCheck(res: ServerResponse, headers: Record<string, string>): Promise<void> {
+  private async handleHealthCheck(res: ServerResponse, headers: Record<string, string>, requestId: string): Promise<void> {
     const health = await this.getHealthStatus();
     const statusCode = health.status === 'healthy' ? 200 : 503;
 
     res.writeHead(statusCode, headers);
-    res.end(JSON.stringify(health, null, 2));
+    res.end(JSON.stringify({ ...health, requestId }, null, 2));
   }
 
-  private async handleReadinessCheck(res: ServerResponse, headers: Record<string, string>): Promise<void> {
+  private async handleReadinessCheck(res: ServerResponse, headers: Record<string, string>, requestId: string): Promise<void> {
     const health = await this.getHealthStatus();
     const isReady =
       health.checks.quaiRpc.status === 'pass' &&
@@ -243,12 +289,12 @@ class HealthService {
 
     const statusCode = isReady ? 200 : 503;
     res.writeHead(statusCode, headers);
-    res.end(JSON.stringify({ ready: isReady }));
+    res.end(JSON.stringify({ ready: isReady, requestId }));
   }
 
-  private handleLivenessCheck(res: ServerResponse, headers: Record<string, string>): void {
+  private handleLivenessCheck(res: ServerResponse, headers: Record<string, string>, requestId: string): void {
     res.writeHead(200, headers);
-    res.end(JSON.stringify({ alive: true }));
+    res.end(JSON.stringify({ alive: true, requestId }));
   }
 
   private async getHealthStatus(): Promise<HealthStatus> {
@@ -311,14 +357,33 @@ class HealthService {
   }
 
   private async checkQuaiRpc(): Promise<{ quaiRpcCheck: CheckResult; currentBlock: number | null }> {
-    try {
-      const currentBlock = await quai.getBlockNumber();
-      return { quaiRpcCheck: { status: 'pass' }, currentBlock };
-    } catch (error) {
+    // If circuit breaker is open, skip RPC check to avoid hammering a failing endpoint
+    // Report degraded status instead of making another failing call
+    if (this.rpcCircuitBreakerOpen) {
       return {
         quaiRpcCheck: {
           status: 'fail',
-          message: `RPC error: ${(error as Error).message}`,
+          message: 'RPC circuit breaker open - recovering',
+        },
+        currentBlock: null,
+      };
+    }
+
+    try {
+      const currentBlock = await withTimeout(
+        quai.getBlockNumber(),
+        HEALTH_CHECK_TIMEOUT_MS,
+        'RPC check'
+      );
+      return { quaiRpcCheck: { status: 'pass' }, currentBlock };
+    } catch (err) {
+      // Log detailed error internally, return generic message to clients
+      // Use 'err' property - pino auto-serializes Error objects with this key
+      logger.error({ err }, 'RPC health check failed');
+      return {
+        quaiRpcCheck: {
+          status: 'fail',
+          message: 'RPC connection error',
         },
         currentBlock: null,
       };
@@ -330,7 +395,11 @@ class HealthService {
     indexerState: { lastIndexedBlock: number; isSyncing: boolean } | null;
   }> {
     try {
-      const state = await supabase.getIndexerState();
+      const state = await withTimeout(
+        supabase.getIndexerState(),
+        HEALTH_CHECK_TIMEOUT_MS,
+        'Database check'
+      );
       return {
         supabaseCheck: { status: 'pass' },
         indexerState: {
@@ -338,11 +407,14 @@ class HealthService {
           isSyncing: state.isSyncing,
         },
       };
-    } catch (error) {
+    } catch (err) {
+      // Log detailed error internally, return generic message to clients
+      // Use 'err' property - pino auto-serializes Error objects with this key
+      logger.error({ err }, 'Database health check failed');
       return {
         supabaseCheck: {
           status: 'fail',
-          message: `Database error: ${(error as Error).message}`,
+          message: 'Database connection error',
         },
         indexerState: null,
       };

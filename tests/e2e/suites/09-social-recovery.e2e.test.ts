@@ -298,6 +298,9 @@ describe('SocialRecoveryModule Events', () => {
     // Full RecoveryExecuted event indexing would require waiting 24+ hours or using a
     // test-specific module deployment with shorter recovery period.
 
+    // Use longer timeout for this test - network can be slow
+    const extendedTimeout = 120000; // 2 minutes
+
     // Need to initiate and execute a new recovery
     const newOwners = [contracts.getGuardianAddress(0)];
     const newThreshold = 1;
@@ -321,7 +324,7 @@ describe('SocialRecoveryModule Events', () => {
         return recovery ? recoveries : null;
       },
       'New recovery initiated',
-      e2eConfig.txConfirmationTimeout
+      extendedTimeout
     );
 
     // IMPORTANT: Initiating guardian must explicitly approve (contract doesn't auto-approve)
@@ -336,7 +339,7 @@ describe('SocialRecoveryModule Events', () => {
         return activeApprovals.length >= 1 ? approvals : null;
       },
       'First guardian approval indexed',
-      e2eConfig.txConfirmationTimeout
+      extendedTimeout
     );
 
     // Second guardian approves
@@ -351,7 +354,7 @@ describe('SocialRecoveryModule Events', () => {
         return activeApprovals.length >= 2 ? approvals : null;
       },
       'Recovery threshold met',
-      e2eConfig.txConfirmationTimeout
+      extendedTimeout
     );
 
     // Verify threshold is met in database

@@ -20,6 +20,8 @@ describe('DailyLimitModule Events', () => {
   let moduleAddress: string;
   let skipAllTests = false;
 
+  // This test suite may need to enable a module which requires multiple transactions
+  // Set a longer timeout than the default 60s hookTimeout
   beforeAll(async () => {
     db = new DatabaseVerifier(supabase, e2eConfig.supabaseSchema);
 
@@ -79,7 +81,7 @@ describe('DailyLimitModule Events', () => {
     }
 
     console.log(`  DailyLimitModule test setup complete`);
-  });
+  }, 180000); // 3 minute timeout for funding + enabling module + waiting for indexer
 
   it('should index DailyLimitSet event', async () => {
     // Skip if prerequisites not met

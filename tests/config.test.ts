@@ -85,4 +85,49 @@ describe('Config', () => {
 
     expect(config.supabase.schema).toBe('testnet');
   });
+
+  it('should throw error for invalid numeric config values', async () => {
+    // Set required env vars
+    process.env.SUPABASE_URL = 'https://test.supabase.co';
+    process.env.SUPABASE_SERVICE_KEY = 'test-key';
+    process.env.QUAIVAULT_FACTORY_ADDRESS = '0x0000000000000000000000000000000000000001';
+    process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS = '0x0000000000000000000000000000000000000002';
+
+    // Set invalid batch size (below minimum of 10)
+    process.env.BATCH_SIZE = '5';
+
+    await expect(import('../src/config.js')).rejects.toThrow(
+      'outside range'
+    );
+  });
+
+  it('should throw error for non-numeric config values', async () => {
+    // Set required env vars
+    process.env.SUPABASE_URL = 'https://test.supabase.co';
+    process.env.SUPABASE_SERVICE_KEY = 'test-key';
+    process.env.QUAIVAULT_FACTORY_ADDRESS = '0x0000000000000000000000000000000000000001';
+    process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS = '0x0000000000000000000000000000000000000002';
+
+    // Set non-numeric poll interval
+    process.env.POLL_INTERVAL = 'not-a-number';
+
+    await expect(import('../src/config.js')).rejects.toThrow(
+      'expected integer'
+    );
+  });
+
+  it('should use new default health port of 8080', async () => {
+    // Set required env vars
+    process.env.SUPABASE_URL = 'https://test.supabase.co';
+    process.env.SUPABASE_SERVICE_KEY = 'test-key';
+    process.env.QUAIVAULT_FACTORY_ADDRESS = '0x0000000000000000000000000000000000000001';
+    process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS = '0x0000000000000000000000000000000000000002';
+
+    // Don't set health port
+    delete process.env.HEALTH_CHECK_PORT;
+
+    const { config } = await import('../src/config.js');
+
+    expect(config.health.port).toBe(8080);
+  });
 });

@@ -1,6 +1,13 @@
 import * as quais from 'quais';
+import { Shard } from 'quais';
 import type { E2EConfig } from '../config.js';
 import { BlockchainHelper } from './blockchain.js';
+
+// Log type for parsing events from transaction receipts
+interface TransactionLog {
+  topics: string[];
+  data: string;
+}
 
 // Import ABIs - these will be resolved at runtime
 import QuaiVaultFactoryABI from '../../../abis/QuaiVaultFactory.json' with { type: 'json' };
@@ -14,20 +21,26 @@ import MockModuleABI from '../../../abis/MockModule.json' with { type: 'json' };
 // Maximum attempts to mine a valid salt for CREATE2
 const MAX_SALT_MINING_ATTEMPTS = 100000;
 
-// Universal gas limit for all transactions (bypasses gas estimation issues on Quai)
-// Quai Network's access list creation can fail intermittently; a consistent gas limit helps
-// Using 20M to ensure sufficient gas for complex operations like CREATE2 deployments
-const GAS_LIMIT = 20000000;
-
-// Retry configuration for access list creation failures
-// Quai Network RPC can have prolonged periods of access list creation failures
-// Increased retries and delay to handle sustained network instability
-const MAX_TX_RETRIES = 20;
-const RETRY_DELAY_MS = 5000;
+// Retry configuration for transient RPC failures
+const MAX_TX_RETRIES = 5;
+const RETRY_DELAY_MS = 2000;
 
 /**
- * Retry wrapper for transactions that may fail due to intermittent access list creation errors
- * on Quai Network. This is a known issue with Quai RPC where createAccessList sporadically fails.
+ * Check if an error is a transient RPC error that should be retried.
+ * These include access list creation failures and gas estimation failures.
+ */
+function isTransientRpcError(err: Error & { code?: string }): boolean {
+  return (
+    err.message?.includes('Access list creation failed') ||
+    err.message?.includes('missing revert data') ||
+    err.code === 'CALL_EXCEPTION'
+  );
+}
+
+/**
+ * Retry wrapper for transactions that may fail due to intermittent RPC errors
+ * on Quai Network. This handles access list creation failures, gas estimation
+ * failures, and other transient CALL_EXCEPTION errors.
  */
 async function withRetry<T>(
   operation: () => Promise<T>,
@@ -41,12 +54,12 @@ async function withRetry<T>(
     try {
       return await operation();
     } catch (error: unknown) {
-      const err = error as Error;
+      const err = error as Error & { code?: string };
       lastError = err;
 
-      // Check if this is the intermittent access list error
-      if (err.message?.includes('Access list creation failed')) {
-        console.log(`    [${operationName}] Access list creation failed (attempt ${attempt}/${maxRetries}), retrying in ${retryDelay}ms...`);
+      // Check if this is a transient RPC error that should be retried
+      if (isTransientRpcError(err)) {
+        console.log(`    [${operationName}] Transient error (attempt ${attempt}/${maxRetries}): ${err.code || err.message?.substring(0, 60)}`);
         if (attempt < maxRetries) {
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
           continue;
@@ -165,7 +178,7 @@ export class ContractHelper {
 
         // CRITICAL: Also warm up the JsonRpcProvider used for transactions
         // Without this call, createAccessList will fail intermittently
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
 
         return;
       } catch (error) {
@@ -212,14 +225,14 @@ export class ContractHelper {
   /**
    * Get a QuaiVault contract instance for a specific wallet address
    */
-  private getQuaiVault(walletAddress: string, signerIndex = 0): Contract {
+  private getQuaiVault(walletAddress: string, signerIndex = 0): quais.Contract {
     return new quais.Contract(walletAddress, QuaiVaultABI.abi, this.ownerWallets[signerIndex]);
   }
 
   /**
    * Get a QuaiVault contract instance using guardian signer
    */
-  private getQuaiVaultAsGuardian(walletAddress: string, guardianIndex: number): Contract {
+  private getQuaiVaultAsGuardian(walletAddress: string, guardianIndex: number): quais.Contract {
     return new quais.Contract(walletAddress, QuaiVaultABI.abi, this.guardianWallets[guardianIndex]);
   }
 
@@ -230,9 +243,10 @@ export class ContractHelper {
   /**
    * Mine a valid salt for CREATE2 deployment on Quai Network
    * On Quai, contract addresses must have shard-specific prefixes (0x00 for cyprus1)
+   * and must pass quais.isQuaiAddress() validation.
    *
    * The factory computes: fullSalt = keccak256(abi.encodePacked(msg.sender, userSalt))
-   * We must find a userSalt that produces an address starting with 0x00
+   * We must find a userSalt that produces a valid Quai address starting with 0x00
    */
   private async mineSalt(
     owners: string[],
@@ -274,8 +288,8 @@ export class ContractHelper {
         bytecodeHash
       );
 
-      // Check if address starts with 0x00 (cyprus1 shard prefix)
-      if (create2Address.toLowerCase().startsWith('0x00')) {
+      // Check if address starts with 0x00 (cyprus1 shard prefix) AND is a valid Quai address
+      if (create2Address.toLowerCase().startsWith('0x00') && quais.isQuaiAddress(create2Address)) {
         console.log(`    Found valid salt after ${i + 1} attempts`);
         console.log(`    Salt: ${userSalt}`);
         console.log(`    Expected address: ${create2Address}`);
@@ -319,16 +333,14 @@ export class ContractHelper {
       try {
         // Warm up the provider before each attempt
         // This helps with intermittent createAccessList failures
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
 
-        // Use explicit method signature to bypass gas estimation issues on Quai
-        // This matches the approach in quaivault-contracts/scripts/create-wallet.ts
-        console.log(`    Sending transaction with gasLimit: ${GAS_LIMIT}... (attempt ${attempt}/${MAX_RETRIES})`);
-        tx = await this.quaiVaultFactory['createWallet(address[],uint256,bytes32)'](
+        // Use explicit method signature for CREATE2 deployment
+        console.log(`    Sending transaction... (attempt ${attempt}/${MAX_RETRIES})`);
+        tx = await this.quaiVaultFactory.createWallet(
           owners,
           threshold,
-          salt,
-          { gasLimit: GAS_LIMIT }
+          salt
         );
         console.log(`    Transaction sent: ${tx.hash}`);
         break; // Success, exit retry loop
@@ -336,9 +348,9 @@ export class ContractHelper {
         const err = error as Error & { code?: string; reason?: string; data?: string };
         lastError = err;
 
-        // Check if this is the intermittent access list error
-        if (err.message?.includes('Access list creation failed')) {
-          console.log(`    Access list creation failed (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms...`);
+        // Check if this is a transient RPC error that should be retried
+        if (isTransientRpcError(err)) {
+          console.log(`    Transient error (attempt ${attempt}/${MAX_RETRIES}): ${err.code || err.message?.substring(0, 60)}`);
           if (attempt < MAX_RETRIES) {
             await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
             continue;
@@ -364,7 +376,7 @@ export class ContractHelper {
     console.log(`    Transaction confirmed in block: ${receipt.blockNumber}`);
 
     // Extract wallet address from WalletCreated event
-    const event = receipt.logs.find((log: { topics: string[] }) => {
+    const event = receipt.logs.find((log: TransactionLog) => {
       try {
         const parsed = this.quaiVaultFactory.interface.parseLog(log);
         return parsed?.name === 'WalletCreated';
@@ -398,8 +410,8 @@ export class ContractHelper {
     await withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
-        const tx = await this.quaiVaultFactory.registerWallet(walletAddress, { gasLimit: GAS_LIMIT });
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        const tx = await this.quaiVaultFactory.registerWallet(walletAddress);
         await tx.wait();
       },
       'registerWallet'
@@ -424,14 +436,14 @@ export class ContractHelper {
     return withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
         const vault = this.getQuaiVault(walletAddress, signerIndex);
-        const tx = await vault.proposeTransaction(to, value, data, { gasLimit: GAS_LIMIT });
+        const tx = await vault.proposeTransaction(to, value, data);
         const receipt = await tx.wait();
 
         // Extract txHash from TransactionProposed event
         const proposedTopic = quais.id('TransactionProposed(bytes32,address,address,uint256,bytes)');
-        const proposedLog = receipt.logs.find((log) => log.topics[0] === proposedTopic);
+        const proposedLog = receipt.logs.find((log: TransactionLog) => log.topics[0] === proposedTopic);
 
         if (!proposedLog) {
           throw new Error('TransactionProposed event not found');
@@ -454,9 +466,9 @@ export class ContractHelper {
     await withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
         const vault = this.getQuaiVault(walletAddress, signerIndex);
-        const tx = await vault.approveTransaction(txHash, { gasLimit: GAS_LIMIT });
+        const tx = await vault.approveTransaction(txHash);
         await tx.wait();
       },
       'approveTransaction'
@@ -470,9 +482,9 @@ export class ContractHelper {
     await withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
         const vault = this.getQuaiVault(walletAddress, signerIndex);
-        const tx = await vault.revokeApproval(txHash, { gasLimit: GAS_LIMIT });
+        const tx = await vault.revokeApproval(txHash);
         await tx.wait();
       },
       'revokeApproval'
@@ -490,9 +502,9 @@ export class ContractHelper {
     await withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
         const vault = this.getQuaiVault(walletAddress, signerIndex);
-        const tx = await vault.executeTransaction(txHash, { gasLimit: GAS_LIMIT });
+        const tx = await vault.executeTransaction(txHash);
         await tx.wait();
       },
       'executeTransaction'
@@ -510,9 +522,9 @@ export class ContractHelper {
     await withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
         const vault = this.getQuaiVault(walletAddress, signerIndex);
-        const tx = await vault.cancelTransaction(txHash, { gasLimit: GAS_LIMIT });
+        const tx = await vault.cancelTransaction(txHash);
         await tx.wait();
       },
       'cancelTransaction'
@@ -622,7 +634,7 @@ export class ContractHelper {
     await withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
+        await this.provider.getBlockNumber(Shard.Cyprus1);
 
         // Use quais.getAddress to ensure proper address format
         const toAddress = quais.getAddress(walletAddress);
@@ -632,7 +644,6 @@ export class ContractHelper {
           from: wallet.address,
           to: toAddress,
           value: amount,
-          gasLimit: GAS_LIMIT,
         });
         await tx.wait();
       },
@@ -685,10 +696,11 @@ export class ContractHelper {
     await withRetry(
       async () => {
         // Warm up provider before transaction
-        await this.provider.getBlockNumber();
-        const moduleWithSigner = this.dailyLimitModule!.connect(this.ownerWallets[0]);
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const moduleWithSigner = this.dailyLimitModule!.connect(this.ownerWallets[0]) as any;
         // ABI function: executeBelowLimit(address wallet, address to, uint256 value)
-        const tx = await moduleWithSigner.executeBelowLimit(walletAddress, to, amount, { gasLimit: GAS_LIMIT });
+        const tx = await moduleWithSigner.executeBelowLimit(walletAddress, to, amount);
         await tx.wait();
       },
       'executeDailyLimitTransfer'
@@ -765,10 +777,11 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const moduleWithSigner = this.whitelistModule.connect(this.ownerWallets[0]);
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const moduleWithSigner = this.whitelistModule.connect(this.ownerWallets[0]) as any;
     // ABI function: executeToWhitelist(address wallet, address to, uint256 value, bytes data)
-    const tx = await moduleWithSigner.executeToWhitelist(walletAddress, to, amount, '0x', { gasLimit: GAS_LIMIT });
+    const tx = await moduleWithSigner.executeToWhitelist(walletAddress, to, amount, '0x');
     await tx.wait();
   }
 
@@ -824,18 +837,19 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const moduleWithGuardian = this.socialRecoveryModule.connect(
       this.guardianWallets[guardianIndex]
-    );
-    const tx = await moduleWithGuardian.initiateRecovery(walletAddress, newOwners, newThreshold, { gasLimit: GAS_LIMIT });
+    ) as any;
+    const tx = await moduleWithGuardian.initiateRecovery(walletAddress, newOwners, newThreshold);
     const receipt = await tx.wait();
 
     // Extract recovery hash from RecoveryInitiated event
     const initiatedTopic = quais.id(
       'RecoveryInitiated(address,bytes32,address[],uint256,address)'
     );
-    const initiatedLog = receipt.logs.find((log) => log.topics[0] === initiatedTopic);
+    const initiatedLog = receipt.logs.find((log: TransactionLog) => log.topics[0] === initiatedTopic);
 
     if (!initiatedLog) {
       throw new Error('RecoveryInitiated event not found');
@@ -857,11 +871,12 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const moduleWithGuardian = this.socialRecoveryModule.connect(
       this.guardianWallets[guardianIndex]
-    );
-    const tx = await moduleWithGuardian.approveRecovery(walletAddress, recoveryHash, { gasLimit: GAS_LIMIT });
+    ) as any;
+    const tx = await moduleWithGuardian.approveRecovery(walletAddress, recoveryHash);
     await tx.wait();
   }
 
@@ -878,12 +893,13 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const moduleWithGuardian = this.socialRecoveryModule.connect(
       this.guardianWallets[guardianIndex]
-    );
+    ) as any;
     // Contract function is revokeRecoveryApproval (not revokeApproval)
-    const tx = await moduleWithGuardian.revokeRecoveryApproval(walletAddress, recoveryHash, { gasLimit: GAS_LIMIT });
+    const tx = await moduleWithGuardian.revokeRecoveryApproval(walletAddress, recoveryHash);
     await tx.wait();
   }
 
@@ -896,8 +912,8 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const tx = await this.socialRecoveryModule.executeRecovery(walletAddress, recoveryHash, { gasLimit: GAS_LIMIT });
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    const tx = await this.socialRecoveryModule.executeRecovery(walletAddress, recoveryHash);
     await tx.wait();
   }
 
@@ -914,9 +930,10 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const moduleWithOwner = this.socialRecoveryModule.connect(this.ownerWallets[signerIndex]);
-    const tx = await moduleWithOwner.cancelRecovery(walletAddress, recoveryHash, { gasLimit: GAS_LIMIT });
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const moduleWithOwner = this.socialRecoveryModule.connect(this.ownerWallets[signerIndex]) as any;
+    const tx = await moduleWithOwner.cancelRecovery(walletAddress, recoveryHash);
     await tx.wait();
   }
 
@@ -940,8 +957,8 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const tx = await this.mockModule.setTarget(walletAddress, { gasLimit: GAS_LIMIT });
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    const tx = await this.mockModule.setTarget(walletAddress);
     await tx.wait();
   }
 
@@ -965,8 +982,8 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const tx = await this.mockModule.exec(to, value, data, operation, { gasLimit: GAS_LIMIT });
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    const tx = await this.mockModule.exec(to, value, data, operation);
     const receipt = await tx.wait();
 
     // Parse return value from logs/events
@@ -991,8 +1008,8 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const tx = await this.mockModule.execLegacy(to, value, data, { gasLimit: GAS_LIMIT });
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    const tx = await this.mockModule.execLegacy(to, value, data);
     const receipt = await tx.wait();
     return receipt.status === 1;
   }
@@ -1007,8 +1024,8 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const tx = await this.mockModule.tryEnableModule(moduleToEnable, { gasLimit: GAS_LIMIT });
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    const tx = await this.mockModule.tryEnableModule(moduleToEnable);
     const receipt = await tx.wait();
     return receipt.status === 1;
   }
@@ -1026,10 +1043,8 @@ export class ContractHelper {
     }
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
-    const tx = await this.mockModule.tryDisableModule(prevModule, moduleToDisable, {
-      gasLimit: GAS_LIMIT,
-    });
+    await this.provider.getBlockNumber(Shard.Cyprus1);
+    const tx = await this.mockModule.tryDisableModule(prevModule, moduleToDisable);
     const receipt = await tx.wait();
     return receipt.status === 1;
   }
@@ -1058,13 +1073,13 @@ export class ContractHelper {
     const data = quaiVaultIface.encodeFunctionData('changeThreshold', [0]);
 
     // Warm up provider before transaction
-    await this.provider.getBlockNumber();
+    await this.provider.getBlockNumber(Shard.Cyprus1);
 
     // Call exec() to execute changeThreshold(0) on the wallet
     // The outer call (MockModule.exec) will succeed
     // The inner call (QuaiVault.execTransactionFromModule -> wallet.changeThreshold(0)) will fail
     // This causes ExecutionFromModuleFailure to be emitted
-    const tx = await this.mockModule.exec(walletAddress, 0, data, 0, { gasLimit: GAS_LIMIT });
+    const tx = await this.mockModule.exec(walletAddress, 0, data, 0);
     const receipt = await tx.wait();
 
     // Return true if the MockModule.exec() transaction succeeded

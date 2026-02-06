@@ -23,6 +23,8 @@ describe('Zodiac IAvatar Module Execution Events', () => {
   let useMockModule: boolean;
   let skipAllTests = false;
 
+  // This test suite may need to enable a module which requires multiple transactions
+  // Set a longer timeout than the default 60s hookTimeout
   beforeAll(async () => {
     db = new DatabaseVerifier(supabase, e2eConfig.supabaseSchema);
 
@@ -93,7 +95,7 @@ describe('Zodiac IAvatar Module Execution Events', () => {
     }
 
     console.log(`  Test wallet ready: ${walletAddress}`);
-  });
+  }, 180000); // 3 minute timeout (funding + enabling module + waiting for indexer + setting target)
 
   it('should index ExecutionFromModuleSuccess event', async () => {
     // Skip if prerequisites not met

@@ -149,9 +149,9 @@ async function backfill(): Promise<void> {
         },
         'Backfill progress'
       );
-    } catch (error) {
-      logger.error({ error, start, end }, 'Backfill batch failed');
-      throw error;
+    } catch (err) {
+      logger.error({ err, start, end }, 'Backfill batch failed');
+      throw err;
     }
   }
 
@@ -165,7 +165,7 @@ async function backfill(): Promise<void> {
   );
 }
 
-backfill().catch((error) => {
-  logger.error({ error }, 'Backfill failed');
+backfill().catch((err) => {
+  logger.error({ err }, 'Backfill failed');
   process.exit(1);
 });
