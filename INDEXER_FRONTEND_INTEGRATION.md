@@ -1,6 +1,6 @@
 # Frontend Integration Guide
 
-This guide explains how to integrate a frontend application with the Quai Multisig Indexer via Supabase.
+This guide explains how to integrate a frontend application with the QuaiVault Indexer via Supabase.
 
 ## Overview
 
@@ -125,6 +125,25 @@ export function useNetwork() {
 
 **Important:** The frontend should use the **anon key** (public). The service role key is only for the indexer.
 
+## Schema Setup (Important!)
+
+After creating a network schema with `create_network_schema()`, you **must expose it to the PostgREST API**. Without this step, the frontend will get `PGRST205` errors.
+
+Run this in Supabase SQL Editor:
+
+```sql
+-- Expose schemas to PostgREST API
+ALTER ROLE authenticator SET pgrst.db_schemas TO 'public, graphql_public, testnet, mainnet';
+NOTIFY pgrst, 'reload config';
+```
+
+Wait 10-15 seconds for PostgREST to reload, then verify:
+
+```sql
+SELECT rolname, rolconfig FROM pg_roles WHERE rolname = 'authenticator';
+-- Should show: pgrst.db_schemas=public, graphql_public, testnet, mainnet
+```
+
 ## Database Schema Reference
 
 ### Core Tables
@@ -133,10 +152,11 @@ export function useNetwork() {
 |-------|-------------|------------|
 | `wallets` | Deployed multisig wallets | `address`, `threshold`, `owner_count` |
 | `wallet_owners` | Wallet owner addresses | `wallet_address`, `owner_address`, `is_active` |
-| `transactions` | Proposed multisig transactions | `wallet_address`, `tx_hash`, `status`, `confirmation_count` |
+| `transactions` | Proposed multisig transactions | `wallet_address`, `tx_hash`, `status`, `confirmation_count`, `executed_by` |
 | `confirmations` | Owner approvals | `wallet_address`, `tx_hash`, `owner_address`, `is_active` |
 | `wallet_modules` | Enabled modules per wallet | `wallet_address`, `module_address`, `is_active` |
 | `deposits` | QUAI received by wallets | `wallet_address`, `sender_address`, `amount` |
+| `indexer_state` | Indexer sync status | `last_indexed_block`, `is_syncing` |
 
 ### Module Tables
 
@@ -144,7 +164,8 @@ export function useNetwork() {
 |-------|-------------|
 | `daily_limit_state` | Daily spending limit configuration |
 | `whitelist_entries` | Whitelisted addresses for a wallet |
-| `module_transactions` | Transactions executed via modules |
+| `module_transactions` | Transactions executed via modules (DailyLimit, Whitelist) |
+| `module_executions` | Zodiac IAvatar module execution results (success/failure) |
 
 ### Social Recovery Tables
 
@@ -300,6 +321,36 @@ async function getWhitelistEntries(walletAddress: string) {
 }
 ```
 
+### Get Module Transactions
+
+```typescript
+async function getModuleTransactions(walletAddress: string) {
+  const { data, error } = await supabase
+    .from('module_transactions')
+    .select('*')
+    .eq('wallet_address', walletAddress.toLowerCase())
+    .order('created_at', { ascending: false });
+
+  return data ?? [];
+}
+```
+
+### Get Indexer Sync Status (from Database)
+
+An alternative to the health check endpoint - query sync status directly from the database:
+
+```typescript
+async function getIndexerState() {
+  const { data, error } = await supabase
+    .from('indexer_state')
+    .select('*')
+    .eq('id', 'main')
+    .single();
+
+  return data; // { last_indexed_block, is_syncing, last_indexed_at }
+}
+```
+
 ### Get Social Recovery Status
 
 ```typescript
@@ -343,28 +394,26 @@ Supabase Realtime enables live updates without polling. Subscribe to tables that
 
 ### Enable Realtime for Custom Schemas
 
-By default, Supabase Realtime only monitors the `public` schema. For custom schemas (`testnet`, `mainnet`), you need to enable Realtime on each table. Run this in the Supabase SQL Editor:
+**Good news:** If you created your schema using `create_network_schema()` from `schema.sql`, **Realtime is automatically enabled** for all tables. No manual setup required.
+
+If you need to manually enable Realtime (e.g., for a schema created before this feature), run in Supabase SQL Editor:
 
 ```sql
--- Enable realtime for testnet tables
+-- Enable realtime for a schema (example: testnet)
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.wallets;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.wallet_owners;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.transactions;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.confirmations;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.deposits;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.wallet_modules;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.module_executions;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.module_transactions;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.daily_limit_state;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.whitelist_entries;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.social_recoveries;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.social_recovery_approvals;
-
--- Enable realtime for mainnet tables
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.wallets;
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.wallet_owners;
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.transactions;
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.confirmations;
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.deposits;
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.wallet_modules;
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.social_recoveries;
-ALTER PUBLICATION supabase_realtime ADD TABLE mainnet.social_recovery_approvals;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.social_recovery_configs;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.social_recovery_guardians;
 ```
 
 Alternatively, enable Realtime via the Supabase Dashboard: **Database → Replication → Add tables to `supabase_realtime`**.
@@ -502,6 +551,60 @@ function subscribeToRecovery(
 }
 ```
 
+### Subscribe to Daily Limit Changes
+
+```typescript
+function subscribeToDailyLimit(
+  supabase: SupabaseClient,
+  schema: 'testnet' | 'mainnet',
+  walletAddress: string,
+  onChange: (state: DailyLimitState) => void
+) {
+  const channel = supabase
+    .channel(`daily_limit:${walletAddress}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: schema,
+        table: 'daily_limit_state',
+        filter: `wallet_address=eq.${walletAddress.toLowerCase()}`
+      },
+      (payload) => onChange(payload.new as DailyLimitState)
+    )
+    .subscribe();
+
+  return () => supabase.removeChannel(channel);
+}
+```
+
+### Subscribe to Whitelist Changes
+
+```typescript
+function subscribeToWhitelist(
+  supabase: SupabaseClient,
+  schema: 'testnet' | 'mainnet',
+  walletAddress: string,
+  onChange: (entry: WhitelistEntry) => void
+) {
+  const channel = supabase
+    .channel(`whitelist:${walletAddress}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: schema,
+        table: 'whitelist_entries',
+        filter: `wallet_address=eq.${walletAddress.toLowerCase()}`
+      },
+      (payload) => onChange(payload.new as WhitelistEntry)
+    )
+    .subscribe();
+
+  return () => supabase.removeChannel(channel);
+}
+```
+
 ## TypeScript Types
 
 ```typescript
@@ -536,7 +639,7 @@ interface Transaction {
   to_address: string;
   value: string; // BigInt as string
   data: string | null;
-  transaction_type: string;
+  transaction_type: 'transfer' | 'wallet_admin' | 'module_config' | 'recovery_setup' | 'external_call' | 'module_execution' | 'batched_call' | 'unknown';
   decoded_params: Record<string, unknown> | null;
   status: 'pending' | 'executed' | 'cancelled';
   confirmation_count: number;
@@ -545,6 +648,7 @@ interface Transaction {
   submitted_at_tx: string;
   executed_at_block: number | null;
   executed_at_tx: string | null;
+  executed_by: string | null; // Address that executed the transaction
   cancelled_at_block: number | null;
   cancelled_at_tx: string | null;
   created_at: string;
@@ -572,6 +676,15 @@ interface Deposit {
   deposited_at_block: number;
   deposited_at_tx: string;
   created_at: string;
+}
+
+// Indexer sync state (alternative to health check endpoint)
+interface IndexerState {
+  id: string; // Always 'main'
+  last_indexed_block: number;
+  last_indexed_at: string | null;
+  is_syncing: boolean;
+  updated_at: string;
 }
 
 interface WalletModule {
@@ -669,11 +782,26 @@ interface RecoveryApproval {
 interface ModuleTransaction {
   id: string;
   wallet_address: string;
-  module_type: string;
+  module_type: 'daily_limit' | 'whitelist' | 'social_recovery';
   module_address: string;
   to_address: string;
   value: string;
   remaining_limit: string | null;
+  executed_at_block: number;
+  executed_at_tx: string;
+  created_at: string;
+}
+
+// Zodiac IAvatar module execution tracking
+interface ModuleExecution {
+  id: string;
+  wallet_address: string;
+  module_address: string;
+  success: boolean; // true = ExecutionFromModuleSuccess, false = ExecutionFromModuleFailure
+  operation_type: number | null; // 0=call, 1=delegatecall (if available)
+  to_address: string | null;
+  value: string | null;
+  data_hash: string | null;
   executed_at_block: number;
   executed_at_tx: string;
   created_at: string;
@@ -691,6 +819,9 @@ The indexer decodes transaction calldata and stores the type in `transaction_typ
 | `module_config` | setDailyLimit, addToWhitelist, setupRecovery, etc. |
 | `recovery_setup` | Social recovery configuration |
 | `external_call` | Generic contract interaction |
+| `module_execution` | Zodiac IAvatar module execution (via execTransactionFromModule) |
+| `batched_call` | MultiSend batched transaction |
+| `unknown` | Unrecognized calldata |
 
 Decoded parameters are stored in `decoded_params` as JSON:
 
@@ -784,10 +915,12 @@ const address = walletAddress.toLowerCase();
 The `value` and `amount` fields are stored as strings (PostgreSQL can't store JS BigInt). Parse them as needed:
 
 ```typescript
-import { formatEther } from 'quais';
+import { formatQuai } from 'quais';
 
-const displayAmount = formatEther(transaction.value);
+const displayAmount = formatQuai(transaction.value);
 ```
+
+**Note:** Use `formatQuai` (not `formatEther`) for Quai network values.
 
 ### 3. Use Pagination for Large Datasets
 
@@ -876,11 +1009,12 @@ The indexer exposes a health check endpoint that frontends can use to:
 ### Health Check Endpoint
 
 ```typescript
-const INDEXER_HEALTH_URL = process.env.VITE_INDEXER_URL || 'http://localhost:3000';
+const INDEXER_HEALTH_URL = process.env.VITE_INDEXER_URL || 'http://localhost:8080';
 
 interface HealthStatus {
   status: 'healthy' | 'unhealthy';
   timestamp: string;
+  requestId: string; // UUID for request tracing
   checks: {
     quaiRpc: { status: 'pass' | 'fail'; message?: string };
     supabase: { status: 'pass' | 'fail'; message?: string };
@@ -966,8 +1100,8 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
 # Network configuration
 VITE_NETWORK_SCHEMA=testnet  # 'testnet' or 'mainnet'
 
-# Optional: Indexer health check URL
-VITE_INDEXER_URL=http://localhost:3001  # testnet: 3001, mainnet: 3002
+# Optional: Indexer health check URL (default port is 8080)
+VITE_INDEXER_URL=http://localhost:8080
 ```
 
 **Security Notes:**
@@ -980,7 +1114,81 @@ VITE_INDEXER_URL=http://localhost:3001  # testnet: 3001, mainnet: 3002
 | Setting | Testnet | Mainnet |
 |---------|---------|---------|
 | `VITE_NETWORK_SCHEMA` | `testnet` | `mainnet` |
-| `VITE_INDEXER_URL` | `http://localhost:3001` | `http://localhost:3002` |
+| `VITE_INDEXER_URL` | `http://localhost:8080` | `http://localhost:8080` |
 | Quai RPC (for contract calls) | `https://rpc.orchard.quai.network/cyprus1` | `https://rpc.quai.network/cyprus1` |
 
 For production deployments, replace localhost URLs with your actual indexer endpoints.
+
+## New in v2.0: Zodiac IAvatar Support
+
+The indexer now tracks Zodiac IAvatar module executions:
+
+### Get Module Executions
+
+```typescript
+async function getModuleExecutions(walletAddress: string) {
+  const { data, error } = await supabase
+    .from('module_executions')
+    .select('*')
+    .eq('wallet_address', walletAddress.toLowerCase())
+    .order('created_at', { ascending: false });
+
+  return data ?? [];
+}
+```
+
+### Subscribe to Module Executions
+
+```typescript
+function subscribeToModuleExecutions(
+  supabase: SupabaseClient,
+  schema: 'testnet' | 'mainnet',
+  walletAddress: string,
+  onExecution: (execution: ModuleExecution) => void
+) {
+  const channel = supabase
+    .channel(`module_executions:${walletAddress}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: schema,
+        table: 'module_executions',
+        filter: `wallet_address=eq.${walletAddress.toLowerCase()}`
+      },
+      (payload) => onExecution(payload.new as ModuleExecution)
+    )
+    .subscribe();
+
+  return () => supabase.removeChannel(channel);
+}
+```
+
+### Check Who Executed a Transaction
+
+```typescript
+async function getTransactionExecutor(walletAddress: string, txHash: string) {
+  const { data } = await supabase
+    .from('transactions')
+    .select('executed_by, executed_at_block, executed_at_tx')
+    .eq('wallet_address', walletAddress.toLowerCase())
+    .eq('tx_hash', txHash.toLowerCase())
+    .single();
+
+  return data?.executed_by ?? null;
+}
+```
+
+## Indexed Events Summary
+
+The indexer captures 27 blockchain events from 5 contract sources:
+
+| Contract | Events |
+|----------|--------|
+| QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `ModuleEnabled`, `ModuleDisabled`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure` |
+| DailyLimitModule | `DailyLimitSet`, `DailyLimitReset`, `TransactionExecuted` |
+| WhitelistModule | `AddressWhitelisted`, `AddressRemovedFromWhitelist`, `WhitelistTransactionExecuted` |
+| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled` |
+
+For detailed event-to-table mappings and E2E test coverage, see [TESTING.md](TESTING.md).

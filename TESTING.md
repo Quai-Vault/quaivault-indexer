@@ -1,370 +1,428 @@
 # Testing the QuaiVault Indexer
 
-This document describes how to verify the indexer is correctly capturing and storing blockchain events.
+This document describes how to run the automated E2E test suite and manually verify indexer functionality.
 
-## Prerequisites
+## Table of Contents
 
-1. **Indexer running**: Start the indexer with `npm run dev`
-2. **Frontend running**: The QuaiVault frontend at `http://localhost:5173`
-3. **Pelagus wallet**: Browser extension connected to Orchard testnet (Cyprus1)
-4. **Test QUAI**: Funds in your wallet for gas fees
-
-## Testing Workflow
-
-### 1. Wallet Creation (WalletRegistered Event)
-
-1. Open the frontend and connect your Pelagus wallet
-2. Click "Create New Wallet"
-3. Add 2-3 owner addresses and set threshold to 2
-4. Confirm the deployment transaction in Pelagus
-5. Confirm the registration transaction in Pelagus
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM wallets ORDER BY created_at DESC LIMIT 1;
-```
-
-Expected: New wallet with correct owners array and threshold.
-
-### 2. Deposit QUAI (Received Event)
-
-1. Send QUAI to your multisig wallet address from any account
-2. Wait for the transaction to confirm
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM deposits
-WHERE wallet_address = '<your-wallet-address>'
-ORDER BY created_at DESC LIMIT 1;
-```
-
-Expected: Deposit record with sender_address and amount.
-
-### 3. Transaction Proposal (TransactionProposed Event)
-
-1. Open your multisig wallet in the frontend
-2. Click "New Transaction"
-3. Enter a recipient address, amount, and optional data
-4. Submit the proposal
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM transactions
-WHERE wallet_address = '<your-wallet-address>'
-ORDER BY created_at DESC LIMIT 1;
-```
-
-Expected: New transaction with `status = 'pending'` and `confirmation_count = 1`.
-
-### 4. Transaction Approval (TransactionApproved Event)
-
-1. Connect as a different owner (switch account in Pelagus)
-2. Navigate to the pending transaction
-3. Click "Approve"
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM confirmations
-WHERE tx_hash = '<transaction-hash>';
-```
-
-Expected: New confirmation record with `is_active = true`.
-
-### 5. Approval Revocation (ApprovalRevoked Event)
-
-1. As an owner who approved, click "Revoke Approval"
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM confirmations
-WHERE tx_hash = '<transaction-hash>'
-  AND owner_address = '<your-address>';
-```
-
-Expected: Confirmation record updated with `is_active = false`.
-
-### 6. Transaction Execution (TransactionExecuted Event)
-
-1. Once threshold is met, click "Execute"
-2. Confirm the transaction in Pelagus
-
-**Verify in Supabase:**
-```sql
-SELECT status FROM transactions WHERE tx_hash = '<transaction-hash>';
-```
-
-Expected: `status = 'executed'`.
-
-### 7. Transaction Cancellation (TransactionCancelled Event)
-
-1. Create a new transaction proposal
-2. As the proposer, click "Cancel"
-
-**Verify in Supabase:**
-```sql
-SELECT status FROM transactions WHERE tx_hash = '<transaction-hash>';
-```
-
-Expected: `status = 'cancelled'`.
-
-### 8. Module Enable/Disable (ModuleEnabled/ModuleDisabled Events)
-
-1. Navigate to wallet settings
-2. Enable the DailyLimitModule
-3. Approve and execute the enable transaction
-4. Later, disable the module via another multisig transaction
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM wallet_modules
-WHERE wallet_address = '<your-wallet-address>';
-```
-
-Expected: Module record with `is_active` toggling based on enable/disable.
+- [E2E Test Suite](#e2e-test-suite)
+  - [Overview](#overview)
+  - [Prerequisites](#prerequisites)
+  - [Configuration](#configuration)
+  - [Running Tests](#running-tests)
+  - [Test Suites](#test-suites)
+  - [Architecture](#architecture)
+  - [Troubleshooting](#troubleshooting)
+- [Manual Testing](#manual-testing)
+- [Event Coverage](#event-coverage)
 
 ---
 
-## Module Configuration Events
+## E2E Test Suite
 
-### 9. Daily Limit Module (DailyLimitSet Event)
+### Overview
 
-1. Enable the DailyLimitModule on your wallet
-2. Configure a daily limit (e.g., 1 QUAI)
-3. Execute the configuration transaction
+The E2E test suite runs real blockchain transactions against the Quai Network testnet to verify the indexer correctly captures and stores all contract events. Tests create actual wallets, propose transactions, enable modules, and verify the data appears correctly in Supabase.
 
-**Verify in Supabase:**
-```sql
-SELECT * FROM daily_limit_state
-WHERE wallet_address = '<your-wallet-address>';
-```
+**Key characteristics:**
+- Tests run on **real blockchain** (Orchard testnet) - not mocked
+- Transactions cost **real testnet QUAI** for gas
+- Tests are **ordered** and **sequential** (01 -> 09)
+- A shared test wallet is created once and reused across suites
+- Test results are logged to `tests/e2e/logs/`
 
-Expected: Record with `daily_limit` set to the configured amount.
+### Prerequisites
 
-### 10. Whitelist Module (AddressWhitelisted Event)
+Before running E2E tests, you need:
 
-1. Enable the WhitelistModule on your wallet
-2. Add an address to the whitelist with a limit
-3. Execute the whitelist transaction
+1. **Indexer running** with the dev schema:
+   ```bash
+   SUPABASE_SCHEMA=dev npm run dev
+   ```
 
-**Verify in Supabase:**
-```sql
-SELECT * FROM whitelist_entries
-WHERE wallet_address = '<your-wallet-address>';
-```
+2. **Dev schema created** in Supabase:
+   ```sql
+   SELECT create_network_schema('dev');
+   ```
 
-Expected: Whitelisted address with the specified limit.
+3. **Contracts deployed** to Orchard testnet:
+   - QuaiVaultFactory
+   - QuaiVault implementation
+   - Optional: DailyLimitModule, WhitelistModule, SocialRecoveryModule, MockModule
 
----
+4. **Test wallets funded** with testnet QUAI:
+   - 3 owner wallets (for multisig threshold testing)
+   - 2 guardian wallets (for social recovery testing)
+   - Each needs enough QUAI for multiple transactions (~0.1 QUAI recommended)
 
-## Social Recovery Flow
+### Configuration
 
-The Social Recovery Module has its own approval/execution flow separate from regular transactions.
+1. Copy the example config:
+   ```bash
+   cp .env.e2e.example .env.e2e
+   ```
 
-### 11. Recovery Setup (RecoverySetup Event)
+2. Fill in your values:
 
-1. Enable the SocialRecoveryModule on your wallet
-2. Configure guardians, threshold, and recovery period
-3. Execute the setup transaction
+   ```bash
+   # Quai Network (Orchard Testnet)
+   QUAI_RPC_URL=https://rpc.orchard.quai.network
+   QUAI_WS_URL=wss://rpc.orchard.quai.network
+   QUAI_CHAIN_ID=9000
 
-**Verify in Supabase:**
-```sql
-SELECT * FROM social_recovery_configs
-WHERE wallet_address = '<your-wallet-address>';
-```
+   # Test wallet private keys (NEVER use keys with real funds!)
+   OWNER_PRIVATE_KEY_1=0x...
+   OWNER_PRIVATE_KEY_2=0x...
+   OWNER_PRIVATE_KEY_3=0x...
+   GUARDIAN_PRIVATE_KEY_1=0x...
+   GUARDIAN_PRIVATE_KEY_2=0x...
 
-Expected: Config with guardians array, threshold, and recovery_period.
+   # Deployed contract addresses
+   QUAIVAULT_FACTORY_ADDRESS=0x...
+   QUAIVAULT_IMPLEMENTATION_ADDRESS=0x...
 
-### 12. Initiate Recovery (RecoveryInitiated Event)
+   # Optional modules (tests skip if not configured)
+   DAILY_LIMIT_MODULE_ADDRESS=0x...
+   WHITELIST_MODULE_ADDRESS=0x...
+   SOCIAL_RECOVERY_MODULE_ADDRESS=0x...
+   MOCK_MODULE=0x...  # For Zodiac execution tests
 
-1. As a guardian, initiate a recovery with new owners
-2. Specify the new owners and new threshold
+   # Supabase (same instance as indexer, use 'dev' schema)
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_SERVICE_KEY=your-service-key
+   SUPABASE_SCHEMA=dev
 
-**Verify in Supabase:**
-```sql
-SELECT * FROM social_recoveries
-WHERE wallet_address = '<your-wallet-address>'
-ORDER BY created_at DESC LIMIT 1;
-```
+   # Indexer health endpoint
+   HEALTH_CHECK_PORT=8080
 
-Expected: Recovery record with `status = 'pending'`, new_owners, new_threshold.
+   # Timing (adjust for network conditions)
+   INDEXER_POLL_INTERVAL=15000   # Poll every 15s
+   TX_CONFIRMATION_TIMEOUT=60000  # Wait up to 60s for indexing
+   ```
 
-### 13. Approve Recovery (RecoveryApproved Event)
+### Running Tests
 
-1. As another guardian, approve the pending recovery
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM social_recovery_approvals
-WHERE recovery_hash = '<recovery-hash>';
-```
-
-Expected: Approval records for each guardian who approved.
-
-### 14. Revoke Recovery Approval (RecoveryApprovalRevoked Event)
-
-1. As a guardian who approved, revoke your approval
-
-**Verify in Supabase:**
-```sql
-SELECT * FROM social_recovery_approvals
-WHERE recovery_hash = '<recovery-hash>'
-  AND guardian_address = '<your-address>';
-```
-
-Expected: Approval record with `is_active = false`.
-
-### 15. Execute Recovery (RecoveryExecuted Event)
-
-1. After the recovery period has elapsed and threshold is met
-2. Execute the recovery
-
-**Verify in Supabase:**
-```sql
-SELECT status FROM social_recoveries WHERE recovery_hash = '<recovery-hash>';
-```
-
-Expected: `status = 'executed'`.
-
-Also verify the wallet owners were updated:
-```sql
-SELECT owner_address FROM wallet_owners
-WHERE wallet_address = '<wallet-address>' AND is_active = true;
-```
-
-### 16. Cancel Recovery (RecoveryCancelled Event)
-
-1. As a wallet owner, cancel a pending recovery
-
-**Verify in Supabase:**
-```sql
-SELECT status FROM social_recoveries WHERE recovery_hash = '<recovery-hash>';
-```
-
-Expected: `status = 'cancelled'`.
-
----
-
-## Monitoring the Indexer
-
-Watch the indexer logs during testing:
-
+**Run all tests:**
 ```bash
-npm run dev
+npm run test:e2e
 ```
 
-You should see log entries like:
-```
-INFO: Processing block 5322500
-INFO: Found 2 events in block 5322500
-INFO: Indexed WalletRegistered event
-INFO: Indexed TransactionProposed event
+**Run tests with live output (recommended for debugging):**
+```bash
+npm run test:e2e 2>&1 | tee tests/e2e/logs/run.log
 ```
 
-## Verifying Real-time Updates
+**Run tests in background:**
+```bash
+npm run test:e2e:bg
+# Check progress:
+tail -f tests/e2e/logs/run.log
+```
 
-The indexer processes blocks in real-time. Events should appear in Supabase within 10-15 seconds of the transaction being confirmed on-chain.
+**Run tests with UI:**
+```bash
+npm run test:e2e:ui
+```
 
-## Troubleshooting
+**Run tests in watch mode:**
+```bash
+npm run test:e2e:watch
+```
 
-### Events not appearing
+**Test output:**
+- Console: Verbose test progress
+- `tests/e2e/logs/run.log`: Full output
+- `tests/e2e/logs/results.json`: JSON results for CI/analysis
 
-1. Check indexer logs for errors
-2. Verify the wallet is registered with the ProxyFactory
-3. Confirm the transaction was successful on-chain (check block explorer)
+### Test Suites
 
-### Duplicate key errors
+Tests run in order from 01 to 09. Each suite depends on previous suites completing successfully.
 
-This is normal if reprocessing blocks. The indexer uses upserts to handle this gracefully.
+#### 01-factory.e2e.test.ts - Wallet Creation
+Creates the shared test wallet used by all subsequent tests.
 
-### Connection issues
+**Events tested:**
+- `WalletCreated` - Factory deployment event
 
-1. Verify RPC_URL is correct in `.env`
-2. Check Supabase connection settings
-3. Ensure the indexer has network access
+**What it does:**
+1. Mines a salt for CREATE2 deployment (required for shard-specific address prefix)
+2. Deploys a new QuaiVault via the factory
+3. Verifies wallet appears in `wallets` table
+4. Verifies all 3 owners appear in `wallet_owners` table
 
-## Database Queries for Verification
+#### 02-deposits.e2e.test.ts - Deposit Tracking
+Tests QUAI deposits to the multisig wallet.
 
-### Check all indexed wallets
+**Events tested:**
+- `Received` - Native QUAI deposit event
+
+**What it does:**
+1. Sends QUAI from owner[0] to the wallet
+2. Verifies deposit appears in `deposits` table
+3. Sends QUAI from owner[1] to test multiple deposits
+
+#### 03-transactions.e2e.test.ts - Transaction Lifecycle
+Tests the full transaction proposal/approval/execution flow.
+
+**Events tested:**
+- `TransactionProposed` - New transaction submitted
+- `TransactionApproved` - Owner approval
+- `ApprovalRevoked` - Owner revokes their approval
+- `TransactionExecuted` - Transaction executed after threshold met
+- `TransactionCancelled` - Proposer cancels transaction
+
+**What it does:**
+1. Proposes a transaction (sends small amount to owner[2])
+2. First owner approves (confirmation_count = 1)
+3. Second owner approves (confirmation_count = 2, threshold met)
+4. Second owner revokes approval (confirmation_count = 1)
+5. Second owner re-approves
+6. Executes the transaction (status = 'executed')
+7. Creates new transaction and cancels it (status = 'cancelled')
+
+#### 04-owners.e2e.test.ts - Owner Management
+Tests adding/removing owners and changing threshold.
+
+**Events tested:**
+- `OwnerAdded` - New owner added to wallet
+- `OwnerRemoved` - Owner removed from wallet
+- `ThresholdChanged` - Signature threshold changed
+
+**What it does:**
+1. Adds guardian[0] as a new owner (requires multisig approval)
+2. Removes guardian[0] from owners
+3. Changes threshold from 2 to 1 (or vice versa)
+
+#### 05-modules.e2e.test.ts - Module Enable/Disable
+Tests enabling and disabling modules on the wallet.
+
+**Events tested:**
+- `ModuleEnabled` - Module enabled on wallet
+- `ModuleDisabled` - Module disabled on wallet
+
+**What it does:**
+1. Enables a module (DailyLimit, Whitelist, or sentinel address)
+2. Disables the module (requires knowing previous module in linked list)
+
+#### 06-daily-limit.e2e.test.ts - Daily Limit Module
+Tests the DailyLimitModule functionality.
+
+**Skipped if:** `DAILY_LIMIT_MODULE_ADDRESS` not configured
+
+**Events tested:**
+- `DailyLimitSet` - Daily limit configured
+- `DailyLimitTransactionExecuted` - Transfer within limit executed
+- `DailyLimitReset` - Daily limit counter reset (time-based)
+
+**What it does:**
+1. Enables DailyLimitModule if not already enabled
+2. Sets a daily limit (e.g., 0.005 QUAI)
+3. Executes a transfer within the limit
+4. Verifies `spent_today` tracking
+
+#### 07-whitelist.e2e.test.ts - Whitelist Module
+Tests the WhitelistModule functionality.
+
+**Skipped if:** `WHITELIST_MODULE_ADDRESS` not configured
+
+**Events tested:**
+- `AddressWhitelisted` - Address added to whitelist
+- `WhitelistTransactionExecuted` - Transfer to whitelisted address
+- `AddressRemovedFromWhitelist` - Address removed from whitelist
+
+**What it does:**
+1. Enables WhitelistModule if not already enabled
+2. Whitelists guardian[0] with a spending limit
+3. Executes a transfer to the whitelisted address
+4. Removes address from whitelist
+
+#### 08-zodiac.e2e.test.ts - Zodiac IAvatar Events
+Tests module execution tracking via Zodiac interface.
+
+**Events tested:**
+- `ExecutionFromModuleSuccess` - Module successfully executed an operation
+- `ExecutionFromModuleFailure` - Module execution failed
+
+**What it does:**
+1. Uses MockModule (if configured) for direct execution testing
+2. Falls back to DailyLimit/Whitelist module operations
+3. Verifies executions appear in `module_executions` table
+
+#### 09-social-recovery.e2e.test.ts - Social Recovery Module
+Tests the full social recovery flow.
+
+**Skipped if:** `SOCIAL_RECOVERY_MODULE_ADDRESS` not configured
+
+**Note:** This suite deploys its **own wallet** to avoid breaking other tests (recovery changes owners).
+
+**Events tested:**
+- `RecoverySetup` - Guardians and threshold configured
+- `RecoveryInitiated` - Guardian starts recovery process
+- `RecoveryApproved` - Guardian approves recovery
+- `RecoveryApprovalRevoked` - Guardian revokes approval
+- `RecoveryCancelled` - Owner cancels recovery
+- `RecoveryExecuted` - Recovery completed (blocked by 24h period in tests)
+
+**What it does:**
+1. Deploys a fresh wallet for recovery testing
+2. Enables SocialRecoveryModule
+3. Sets up 2 guardians with threshold of 2
+4. Initiates recovery to change owners
+5. Both guardians approve
+6. Tests revocation flow
+7. Cancels recovery as owner
+8. Verifies execution is blocked by recovery period (24h minimum)
+
+### Architecture
+
+```
+tests/e2e/
+├── config.ts           # Loads .env.e2e configuration
+├── setup.ts            # Global beforeAll/afterAll hooks
+├── sequencer.ts        # Ensures tests run in numeric order
+├── shared-state.ts     # Wallet address shared between suites
+├── vitest.e2e.config.ts # Vitest configuration
+├── logs/               # Test output logs
+├── helpers/
+│   ├── blockchain.ts   # Blockchain utilities
+│   ├── contracts.ts    # Contract interaction helpers
+│   ├── db.ts          # Database verification helpers
+│   ├── indexer.ts     # Indexer health/sync helpers
+│   └── logger.ts      # Test logging
+└── suites/
+    ├── 01-factory.e2e.test.ts
+    ├── 02-deposits.e2e.test.ts
+    ├── ...
+    └── 09-social-recovery.e2e.test.ts
+```
+
+**Key components:**
+
+- **ContractHelper** (`helpers/contracts.ts`): Wraps all contract interactions with proper gas limits, salt mining for CREATE2, and retry logic for network issues.
+
+- **DatabaseVerifier** (`helpers/db.ts`): Provides assertion helpers to verify expected data exists in Supabase tables.
+
+- **IndexerHelper** (`helpers/indexer.ts`): Polls the indexer health endpoint and waits for expected data to appear.
+
+- **SharedState** (`shared-state.ts`): Maintains the test wallet address and module state across test files using `globalThis`.
+
+### Troubleshooting
+
+#### "Cannot connect to indexer"
+```
+❌ Indexer health check failed:
+Cannot connect to indexer at http://localhost:8080
+```
+
+**Solution:** Start the indexer with:
+```bash
+SUPABASE_SCHEMA=dev npm run dev
+```
+
+#### "At least 3 owner private keys are required"
+```
+E2E Configuration Errors:
+  - At least 3 owner private keys are required
+```
+
+**Solution:** Add all required private keys to `.env.e2e`.
+
+#### Tests timing out
+The blockchain can be slow. Adjust timing in `.env.e2e`:
+```bash
+TX_CONFIRMATION_TIMEOUT=120000  # Increase to 2 minutes
+INDEXER_POLL_INTERVAL=10000     # Poll more frequently
+```
+
+#### "Test wallet not created yet"
+```
+Error: Test wallet not created yet. Make sure factory tests run first
+```
+
+**Solution:** Tests must run in order. Don't run individual suites without running 01-factory first.
+
+#### Module tests skipped
+```
+⚠️ DailyLimitModule not configured - tests will be skipped
+```
+
+**Solution:** Add the module address to `.env.e2e`, or accept that module tests will be skipped.
+
+#### Transaction failures / "Access list creation failed"
+Network congestion can cause transient failures. The test suite has retry logic, but you may need to re-run tests.
+
+---
+
+## Manual Testing
+
+For manual testing with the frontend, see the workflow below.
+
+### Prerequisites
+
+1. **Indexer running**: `npm run dev`
+2. **Frontend running**: QuaiVault frontend at `http://localhost:5173`
+3. **Pelagus wallet**: Connected to Orchard testnet (Cyprus1)
+4. **Test QUAI**: Funds for gas fees
+
+### Basic Workflow
+
+1. **Create Wallet**: Connect Pelagus → Create New Wallet → Add owners → Deploy
+2. **Fund Wallet**: Send QUAI to the wallet address
+3. **Propose Transaction**: New Transaction → Enter details → Submit
+4. **Approve Transaction**: Switch to another owner → Approve
+5. **Execute Transaction**: After threshold met → Execute
+
+### Verify in Supabase
+
 ```sql
-SELECT address, threshold, owner_count, created_at
-FROM wallets
-ORDER BY created_at DESC;
-```
+-- Check wallets
+SELECT * FROM wallets ORDER BY created_at DESC LIMIT 5;
 
-### Check pending transactions
-```sql
+-- Check pending transactions
 SELECT w.address, t.tx_hash, t.status, t.confirmation_count, w.threshold
 FROM transactions t
 JOIN wallets w ON t.wallet_address = w.address
 WHERE t.status = 'pending';
-```
 
-### Check recent activity
-```sql
-SELECT
-  'wallet' as type, address as id, created_at
-FROM wallets
-UNION ALL
-SELECT
-  'transaction' as type, tx_hash as id, created_at
-FROM transactions
-ORDER BY created_at DESC
-LIMIT 20;
-```
+-- Check deposits
+SELECT * FROM deposits WHERE wallet_address = 'your-address' ORDER BY created_at DESC;
 
-### Check deposits
-```sql
-SELECT * FROM deposits
-WHERE wallet_address = '<your-wallet-address>'
-ORDER BY created_at DESC;
-```
-
-### Check module transactions (Daily Limit / Whitelist)
-```sql
-SELECT * FROM module_transactions
-WHERE wallet_address = '<your-wallet-address>'
-ORDER BY created_at DESC;
-```
-
-### Check recovery status
-```sql
-SELECT r.*,
-  (SELECT COUNT(*) FROM social_recovery_approvals ra
-   WHERE ra.recovery_hash = r.recovery_hash AND ra.is_active = true) as current_approvals
-FROM social_recoveries r
-WHERE r.wallet_address = '<your-wallet-address>';
+-- Check module executions (Zodiac)
+SELECT * FROM module_executions WHERE wallet_address = 'your-address' ORDER BY created_at DESC;
 ```
 
 ---
 
-## Summary of Indexed Events
+## Event Coverage
 
-| Source | Event | Database Table |
-|--------|-------|----------------|
-| ProxyFactory | WalletCreated | wallets, wallet_owners |
-| ProxyFactory | WalletRegistered | wallets, wallet_owners |
-| QuaiVault | TransactionProposed | transactions |
-| QuaiVault | TransactionApproved | confirmations |
-| QuaiVault | ApprovalRevoked | confirmations |
-| QuaiVault | TransactionExecuted | transactions |
-| QuaiVault | TransactionCancelled | transactions |
-| QuaiVault | OwnerAdded | wallet_owners |
-| QuaiVault | OwnerRemoved | wallet_owners |
-| QuaiVault | ThresholdChanged | wallets |
-| QuaiVault | ModuleEnabled | wallet_modules |
-| QuaiVault | ModuleDisabled | wallet_modules |
-| QuaiVault | Received | deposits |
-| QuaiVault | ExecutionFromModuleSuccess | module_executions |
-| QuaiVault | ExecutionFromModuleFailure | module_executions |
-| DailyLimitModule | DailyLimitSet | daily_limit_state |
-| DailyLimitModule | DailyLimitReset | daily_limit_state |
-| DailyLimitModule | TransactionExecuted | module_transactions |
-| WhitelistModule | AddressWhitelisted | whitelist_entries |
-| WhitelistModule | AddressRemovedFromWhitelist | whitelist_entries |
-| WhitelistModule | WhitelistTransactionExecuted | module_transactions |
-| SocialRecoveryModule | RecoverySetup | social_recovery_configs, social_recovery_guardians |
-| SocialRecoveryModule | RecoveryInitiated | social_recoveries |
-| SocialRecoveryModule | RecoveryApproved | social_recovery_approvals |
-| SocialRecoveryModule | RecoveryApprovalRevoked | social_recovery_approvals |
-| SocialRecoveryModule | RecoveryExecuted | social_recoveries |
-| SocialRecoveryModule | RecoveryCancelled | social_recoveries |
+The indexer tracks 27 distinct events across 5 contract sources:
+
+| Source | Event | Database Table | E2E Test |
+|--------|-------|----------------|----------|
+| QuaiVaultFactory | WalletCreated | wallets, wallet_owners | 01-factory |
+| QuaiVault | TransactionProposed | transactions | 03-transactions |
+| QuaiVault | TransactionApproved | confirmations | 03-transactions |
+| QuaiVault | ApprovalRevoked | confirmations | 03-transactions |
+| QuaiVault | TransactionExecuted | transactions | 03-transactions |
+| QuaiVault | TransactionCancelled | transactions | 03-transactions |
+| QuaiVault | OwnerAdded | wallet_owners | 04-owners |
+| QuaiVault | OwnerRemoved | wallet_owners | 04-owners |
+| QuaiVault | ThresholdChanged | wallets | 04-owners |
+| QuaiVault | ModuleEnabled | wallet_modules | 05-modules |
+| QuaiVault | ModuleDisabled | wallet_modules | 05-modules |
+| QuaiVault | Received | deposits | 02-deposits |
+| QuaiVault | ExecutionFromModuleSuccess | module_executions | 08-zodiac |
+| QuaiVault | ExecutionFromModuleFailure | module_executions | 08-zodiac |
+| DailyLimitModule | DailyLimitSet | daily_limit_state | 06-daily-limit |
+| DailyLimitModule | DailyLimitReset | daily_limit_state | 06-daily-limit |
+| DailyLimitModule | TransactionExecuted | module_transactions | 06-daily-limit |
+| WhitelistModule | AddressWhitelisted | whitelist_entries | 07-whitelist |
+| WhitelistModule | AddressRemovedFromWhitelist | whitelist_entries | 07-whitelist |
+| WhitelistModule | WhitelistTransactionExecuted | module_transactions | 07-whitelist |
+| SocialRecoveryModule | RecoverySetup | social_recovery_configs, social_recovery_guardians | 09-social-recovery |
+| SocialRecoveryModule | RecoveryInitiated | social_recoveries | 09-social-recovery |
+| SocialRecoveryModule | RecoveryApproved | social_recovery_approvals | 09-social-recovery |
+| SocialRecoveryModule | RecoveryApprovalRevoked | social_recovery_approvals | 09-social-recovery |
+| SocialRecoveryModule | RecoveryExecuted | social_recoveries | 09-social-recovery* |
+| SocialRecoveryModule | RecoveryCancelled | social_recoveries | 09-social-recovery |
+
+\* RecoveryExecuted is tested but blocked by the 24-hour recovery period requirement.
