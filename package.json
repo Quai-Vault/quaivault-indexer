@@ -1,5 +1,5 @@
 {
-  "name": "quai-multisig-indexer",
+  "name": "quaivault-indexer",
   "version": "1.0.0",
   "description": "Indexing service for Quai Multisig wallets using Supabase",
   "type": "module",
