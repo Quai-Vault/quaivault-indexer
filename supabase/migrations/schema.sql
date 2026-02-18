@@ -291,7 +291,8 @@ BEGIN
             remaining_limit TEXT,
             executed_at_block BIGINT NOT NULL,
             executed_at_tx TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(wallet_address, module_address, executed_at_tx)
         )', schema_name, schema_name);
 
     -- ============================================
@@ -311,7 +312,8 @@ BEGIN
             data_hash TEXT,
             executed_at_block BIGINT NOT NULL,
             executed_at_tx TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(wallet_address, module_address, executed_at_tx)
         )', schema_name, schema_name);
 
     -- ============================================

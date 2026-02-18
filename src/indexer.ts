@@ -102,31 +102,34 @@ export class Indexer {
     logger.info({ fromBlock, toBlock }, 'Starting backfill');
     await supabase.setIsSyncing(true);
 
-    const batchSize = config.indexer.batchSize;
+    try {
+      const batchSize = config.indexer.batchSize;
 
-    for (let start = fromBlock; start <= toBlock; start += batchSize) {
-      const end = Math.min(start + batchSize - 1, toBlock);
+      for (let start = fromBlock; start <= toBlock; start += batchSize) {
+        const end = Math.min(start + batchSize - 1, toBlock);
 
-      // Use retry with backoff for each batch
-      await withRetry(
-        async () => {
-          await this.indexBlockRange(start, end);
-          await supabase.updateIndexerState(end);
-        },
-        { operation: `backfill-batch-${start}-${end}` }
-      );
+        // Use retry with backoff for each batch
+        await withRetry(
+          async () => {
+            await this.indexBlockRange(start, end);
+            await supabase.updateIndexerState(end);
+          },
+          { operation: `backfill-batch-${start}-${end}` }
+        );
 
-      const totalBlocks = toBlock - fromBlock;
-      const progress = totalBlocks > 0
-        ? (((end - fromBlock) / totalBlocks) * 100).toFixed(1)
-        : '100.0';
-      logger.info(
-        { start, end, progress: `${progress}%` },
-        'Backfill progress'
-      );
+        const totalBlocks = toBlock - fromBlock;
+        const progress = totalBlocks > 0
+          ? (((end - fromBlock) / totalBlocks) * 100).toFixed(1)
+          : '100.0';
+        logger.info(
+          { start, end, progress: `${progress}%` },
+          'Backfill progress'
+        );
+      }
+    } finally {
+      await supabase.setIsSyncing(false);
     }
 
-    await supabase.setIsSyncing(false);
     logger.info('Backfill complete');
   }
 
@@ -149,9 +152,21 @@ export class Indexer {
         await handleEvent(event);
         if (event.name === 'WalletCreated' || event.name === 'WalletRegistered') {
           const walletAddress = event.args.wallet as string;
-          this.trackedWallets.add(walletAddress.toLowerCase());
+          const walletLower = walletAddress.toLowerCase();
+          const isNew = !this.trackedWallets.has(walletLower);
+          this.trackedWallets.add(walletLower);
           health.setTrackedWalletsCount(this.trackedWallets.size);
           logger.info({ wallet: walletAddress, block: event.blockNumber }, 'Discovered new wallet');
+
+          // WalletRegistered signals a pre-existing wallet being added to the factory.
+          // Backfill its on-chain history prior to the registration block so no
+          // events are missed from before it became tracked.
+          if (event.name === 'WalletRegistered' && isNew) {
+            const historyEnd = event.blockNumber - 1;
+            if (historyEnd >= config.indexer.startBlock) {
+              await this.backfillWalletHistory(walletLower, config.indexer.startBlock, historyEnd);
+            }
+          }
         }
       }
     }
@@ -314,6 +329,46 @@ export class Indexer {
         await supabase.updateIndexerState(safeBlock);
       }
     }
+  }
+
+  /**
+   * Backfill historical events for a single wallet address over a block range.
+   * Used when a WalletRegistered event is detected for a pre-existing wallet
+   * that has on-chain history prior to its registration with the factory.
+   */
+  private async backfillWalletHistory(walletAddress: string, fromBlock: number, toBlock: number): Promise<void> {
+    if (fromBlock > toBlock) return;
+
+    logger.info(
+      { wallet: walletAddress, fromBlock, toBlock },
+      'Backfilling history for newly registered wallet'
+    );
+
+    const batchSize = config.indexer.batchSize;
+    for (let start = fromBlock; start <= toBlock; start += batchSize) {
+      const end = Math.min(start + batchSize - 1, toBlock);
+      const logs = await quai.getLogs(
+        walletAddress,
+        [getAllEventTopics()],
+        start,
+        end
+      );
+
+      const sorted = logs.slice().sort((a, b) =>
+        a.blockNumber !== b.blockNumber
+          ? a.blockNumber - b.blockNumber
+          : a.index - b.index
+      );
+
+      for (const log of sorted) {
+        const event = decodeEvent(log);
+        if (event) {
+          await handleEvent(event);
+        }
+      }
+    }
+
+    logger.info({ wallet: walletAddress }, 'Wallet history backfill complete');
   }
 
   private sleep(ms: number): Promise<void> {

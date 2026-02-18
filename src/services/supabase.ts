@@ -244,9 +244,12 @@ class SupabaseService {
 
     const { error } = await this.client
       .from('wallet_owners')
-      .insert(records);
+      .upsert(records, {
+        onConflict: 'wallet_address,owner_address,added_at_block',
+        ignoreDuplicates: true,
+      });
 
-    if (error && error.code !== '23505') throw error; // Ignore duplicates
+    if (error) throw error;
   }
 
   async removeOwner(
@@ -765,7 +768,7 @@ class SupabaseService {
       executed_at_tx: executedAtTx,
     });
 
-    if (error) throw error;
+    if (error && error.code !== '23505') throw error; // Ignore duplicates
   }
 
   // ============================================
@@ -801,7 +804,7 @@ class SupabaseService {
 
     const { error } = await this.client.from('module_executions').insert(record);
 
-    if (error) throw error;
+    if (error && error.code !== '23505') throw error; // Ignore duplicates
   }
 
   async getModuleExecutions(
