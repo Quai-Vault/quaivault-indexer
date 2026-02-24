@@ -78,6 +78,8 @@ describe('SocialRecoveryModule Events', () => {
     console.log(`  Test wallet ready: ${walletAddress}`);
   }, 300000); // 5 minute timeout for beforeAll (deploys wallet + enables module)
 
+  // setupRecovery sends 4 multisig txs (propose + 2 approves + execute) which can take
+  // 40-120s on testnet, plus indexer polling time. 120s default timeout is insufficient.
   it('should index RecoverySetup event', async () => {
     // Skip if prerequisites not met
     if (skipAllTests) {
@@ -114,9 +116,10 @@ describe('SocialRecoveryModule Events', () => {
     expect(config!.recovery_period).toBe(recoveryPeriod);
 
     console.log('  ✓ RecoverySetup event indexed correctly');
-  });
+  }, 300000);
 
-  it('should index RecoveryInitiated event', async () => {
+  // Sends initiateRecovery + approveRecovery txs with multiple waitUntil polls
+  it('should index RecoveryInitiated event', { timeout: 300000 }, async () => {
     // Skip if prerequisites not met
     if (skipAllTests) {
       console.log('  ⏭️ Skipping - prerequisites not met');
@@ -280,7 +283,8 @@ describe('SocialRecoveryModule Events', () => {
     console.log('  ✓ RecoveryCancelled event indexed correctly');
   });
 
-  it('should index RecoveryExecuted event', async () => {
+  // Sends 3 txs (initiate + 2 approvals) + 3 waitUntils + expected-failure execute
+  it('should index RecoveryExecuted event', { timeout: 300000 }, async () => {
     // Skip if prerequisites not met
     if (skipAllTests) {
       console.log('  ⏭️ Skipping - prerequisites not met');

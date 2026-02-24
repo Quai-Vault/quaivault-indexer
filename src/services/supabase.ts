@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
 import type {
   Wallet,
   WalletOwner,
@@ -159,33 +160,6 @@ class SupabaseService {
     }
 
     return addresses;
-  }
-
-  /**
-   * Stream wallet addresses using an async generator.
-   * More memory-efficient for very large datasets (10k+ wallets).
-   * Yields addresses one page at a time without loading all into memory.
-   */
-  async *getAllWalletAddressesIterator(): AsyncGenerator<string> {
-    const PAGE_SIZE = 1000;
-    let offset = 0;
-
-    while (true) {
-      const { data, error } = await this.client
-        .from('wallets')
-        .select('address')
-        .range(offset, offset + PAGE_SIZE - 1);
-
-      if (error) throw error;
-      if (!data || data.length === 0) break;
-
-      for (const wallet of data) {
-        yield wallet.address;
-      }
-
-      if (data.length < PAGE_SIZE) break;
-      offset += PAGE_SIZE;
-    }
   }
 
   async updateWalletThreshold(address: string, threshold: number): Promise<void> {
@@ -473,13 +447,15 @@ class SupabaseService {
 
     if (configError) throw configError;
 
-    // Mark all existing guardians as inactive
-    await this.client
+    // Guardian transition: deactivate old, insert new.
+    // Use compensating action to re-activate old guardians if insert fails.
+    const { error: deactivateError } = await this.client
       .from('social_recovery_guardians')
       .update({ is_active: false })
       .eq('wallet_address', walletAddress);
 
-    // Add new guardians in a single batch insert
+    if (deactivateError) throw deactivateError;
+
     if (normalizedGuardians.length > 0) {
       const guardianRecords = normalizedGuardians.map((guardian) => ({
         wallet_address: walletAddress,
@@ -493,7 +469,15 @@ class SupabaseService {
         .from('social_recovery_guardians')
         .insert(guardianRecords);
 
-      if (guardianError && guardianError.code !== '23505') throw guardianError;
+      if (guardianError && guardianError.code !== '23505') {
+        // Compensate: re-activate old guardians since insert failed
+        logger.error({ err: guardianError, walletAddress }, 'Guardian insert failed, re-activating old guardians');
+        await this.client
+          .from('social_recovery_guardians')
+          .update({ is_active: true })
+          .eq('wallet_address', walletAddress);
+        throw guardianError;
+      }
     }
   }
 

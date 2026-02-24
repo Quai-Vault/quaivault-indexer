@@ -52,7 +52,7 @@ export async function withRetry<T>(
           attempt,
           maxAttempts,
           nextRetryMs: Math.round(jitteredDelay),
-          error: lastError.message,
+          err: lastError,
         },
         'Retrying after error'
       );
@@ -115,7 +115,7 @@ export class RetryTracker {
       operation,
       consecutiveFailures: this.consecutiveFailures,
       nextRetryMs: delay,
-      error: error.message,
+      err: error,
     };
 
     if (this.consecutiveFailures >= this.errorThreshold) {

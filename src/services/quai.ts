@@ -1,87 +1,93 @@
 import { quais, JsonRpcProvider, Shard, Log, ZeroAddress } from 'quais';
+import { LRUCache } from 'lru-cache';
 import { config } from '../config.js';
 import { withRetry } from '../utils/retry.js';
+import { SlidingWindowRateLimiter } from '../utils/rate-limiter.js';
+import { withTimeout } from '../utils/timeout.js';
 import { logger } from '../utils/logger.js';
 import { IndexerLog } from '../types/index.js';
 
 // RPC connection health thresholds
 const RPC_HEALTH = {
   staleThresholdMs: 60000,     // Consider unhealthy if no success for 1 minute
-  failureThreshold: 3,         // Consider unhealthy after 3 consecutive failures
+  failureThreshold: 3,         // Consider unhealthy when >= 3 of last 10 calls failed
+  windowSize: 10,              // Sliding window for health assessment
 };
 
 class QuaiService {
   private wsProvider: quais.WebSocketProvider | null = null;
   private provider: JsonRpcProvider;
 
-  // Rate limiting state
-  private requestTimestamps: number[] = [];
+  // O(1) rate limiter (replaces the old requestTimestamps[] array)
+  private rateLimiter: SlidingWindowRateLimiter;
 
-  // Block timestamp cache with proper LRU eviction
-  // Map maintains insertion order; we re-insert on access to maintain LRU
-  private timestampCache: Map<number, number> = new Map();
+  // Block timestamp cache
+  private timestampCache: LRUCache<number, number>;
 
-  // RPC connection state tracking
-  private lastSuccessfulCall: number = Date.now(); // Assume healthy at start
-  private consecutiveFailures: number = 0;
+  // RPC health tracking with sliding window (not just consecutive failures)
+  private lastSuccessfulCall: number = Date.now();
+  private recentOutcomes: boolean[] = [];
+  private outcomeIndex = 0;
 
   constructor() {
     this.provider = new JsonRpcProvider(config.quai.rpcUrl, undefined, {
       usePathing: true,
+    });
+    this.rateLimiter = new SlidingWindowRateLimiter(
+      config.rateLimit.windowMs,
+      config.rateLimit.requestsPerWindow
+    );
+    this.timestampCache = new LRUCache<number, number>({
+      max: config.cache.timestampCacheSize,
     });
     logger.debug({ rpcUrl: config.quai.rpcUrl }, 'QuaiService initialized with JsonRpcProvider');
   }
 
   /**
    * Check if the RPC connection appears healthy based on recent activity.
-   * Returns true if we've had a successful call recently or haven't hit failure threshold.
+   * Uses a sliding window of recent outcomes rather than just consecutive failures,
+   * so a single success after many failures doesn't immediately report healthy.
    */
   isHealthy(): boolean {
     const timeSinceSuccess = Date.now() - this.lastSuccessfulCall;
     const isStale = timeSinceSuccess > RPC_HEALTH.staleThresholdMs;
-    const tooManyFailures = this.consecutiveFailures >= RPC_HEALTH.failureThreshold;
+
+    const failureCount = this.recentOutcomes.filter((o) => !o).length;
+    const tooManyFailures = failureCount >= RPC_HEALTH.failureThreshold;
 
     return !isStale && !tooManyFailures;
   }
 
-  /**
-   * Get RPC connection statistics for health reporting.
-   */
   getConnectionStats(): {
     lastSuccessfulCall: number;
-    consecutiveFailures: number;
+    recentFailures: number;
     isHealthy: boolean;
     msSinceLastSuccess: number;
   } {
     return {
       lastSuccessfulCall: this.lastSuccessfulCall,
-      consecutiveFailures: this.consecutiveFailures,
+      recentFailures: this.recentOutcomes.filter((o) => !o).length,
       isHealthy: this.isHealthy(),
       msSinceLastSuccess: Date.now() - this.lastSuccessfulCall,
     };
   }
 
-  /**
-   * Record a successful RPC call - resets failure counter and updates timestamp.
-   */
-  private recordSuccess(): void {
-    this.lastSuccessfulCall = Date.now();
-    this.consecutiveFailures = 0;
-  }
-
-  /**
-   * Record a failed RPC call (after all retries exhausted).
-   */
-  private recordFailure(): void {
-    this.consecutiveFailures++;
-    if (this.consecutiveFailures === RPC_HEALTH.failureThreshold) {
-      logger.warn(
-        {
-          consecutiveFailures: this.consecutiveFailures,
-          msSinceLastSuccess: Date.now() - this.lastSuccessfulCall,
-        },
-        'RPC connection degraded - multiple consecutive failures'
-      );
+  private recordOutcome(success: boolean): void {
+    this.recentOutcomes[this.outcomeIndex % RPC_HEALTH.windowSize] = success;
+    this.outcomeIndex++;
+    if (success) {
+      this.lastSuccessfulCall = Date.now();
+    } else {
+      const failures = this.recentOutcomes.filter((o) => !o).length;
+      if (failures === RPC_HEALTH.failureThreshold) {
+        logger.warn(
+          {
+            recentFailures: failures,
+            msSinceLastSuccess: Date.now() - this.lastSuccessfulCall,
+          },
+          'RPC connection degraded - multiple recent failures'
+        );
+      }
     }
   }
 
@@ -91,40 +97,22 @@ class QuaiService {
   private async withTrackedRetry<T>(fn: () => Promise<T>, operation: string): Promise<T> {
     try {
       const result = await withRetry(fn, { operation });
-      this.recordSuccess();
+      this.recordOutcome(true);
       return result;
     } catch (err) {
-      this.recordFailure();
+      this.recordOutcome(false);
       throw err;
     }
   }
 
-  // Rate limiter: ensures we don't exceed RPC rate limits
-  private async rateLimit(): Promise<void> {
-    const now = Date.now();
-    const windowMs = config.rateLimit.windowMs;
-    const maxRequests = config.rateLimit.requestsPerWindow;
-
-    // Remove timestamps outside the current window
-    this.requestTimestamps = this.requestTimestamps.filter(
-      (ts) => now - ts < windowMs
-    );
-
-    if (this.requestTimestamps.length >= maxRequests) {
-      // Wait until the oldest request exits the window
-      const waitTime = windowMs - (now - this.requestTimestamps[0]);
-      if (waitTime > 0) {
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
-      }
-    }
-
-    this.requestTimestamps.push(Date.now());
-  }
-
   async getBlockNumber(): Promise<number> {
-    await this.rateLimit();
+    await this.rateLimiter.acquire();
     return this.withTrackedRetry(
-      () => this.provider.getBlockNumber(Shard.Cyprus1),
+      () => withTimeout(
+        this.provider.getBlockNumber(Shard.Cyprus1),
+        config.rpcTimeout.callTimeoutMs,
+        'getBlockNumber'
+      ),
       'getBlockNumber'
     );
   }
@@ -135,7 +123,7 @@ class QuaiService {
     fromBlock: number,
     toBlock: number
   ): Promise<IndexerLog[]> {
-    await this.rateLimit();
+    await this.rateLimiter.acquire();
 
     // Normalize addresses to lowercase for downstream DB consistency
     const normalizedAddress = Array.isArray(address)
@@ -143,13 +131,17 @@ class QuaiService {
       : address.toLowerCase();
 
     return this.withTrackedRetry(async () => {
-      const logs = await this.provider.getLogs({
-        address: normalizedAddress,
-        topics,
-        fromBlock,
-        toBlock,
-        nodeLocation: [0, 0],  // Cyprus1
-      });
+      const logs = await withTimeout(
+        this.provider.getLogs({
+          address: normalizedAddress,
+          topics,
+          fromBlock,
+          toBlock,
+          nodeLocation: [0, 0],  // Cyprus1
+        }),
+        config.rpcTimeout.callTimeoutMs,
+        'getLogs'
+      );
       return logs.map((log: Log) => ({
         address: log.address.toLowerCase(),
         topics: Array.from(log.topics),
@@ -165,26 +157,30 @@ class QuaiService {
   }
 
   async callContract(address: string, functionSignature: string): Promise<string> {
-    await this.rateLimit();
+    await this.rateLimiter.acquire();
     return this.withTrackedRetry(async () => {
       const selector = quais.id(functionSignature).slice(0, 10);
-      return this.provider.call({ from: ZeroAddress, to: address, data: selector });
+      return withTimeout(
+        this.provider.call({ from: ZeroAddress, to: address, data: selector }),
+        config.rpcTimeout.callTimeoutMs,
+        'callContract'
+      );
     }, 'callContract');
   }
 
   async getBlockTimestamp(blockNumber: number): Promise<number> {
-    // Check cache first
     const cached = this.timestampCache.get(blockNumber);
     if (cached !== undefined) {
-      // Re-insert to maintain LRU order (moves to end of Map)
-      this.timestampCache.delete(blockNumber);
-      this.timestampCache.set(blockNumber, cached);
       return cached;
     }
 
-    await this.rateLimit();
+    await this.rateLimiter.acquire();
     const timestamp = await this.withTrackedRetry(async () => {
-      const block = await this.provider.getBlock(Shard.Cyprus1, blockNumber);
+      const block = await withTimeout(
+        this.provider.getBlock(Shard.Cyprus1, blockNumber),
+        config.rpcTimeout.callTimeoutMs,
+        'getBlockTimestamp'
+      );
       if (!block) {
         throw new Error(`Block ${blockNumber} not found`);
       }
@@ -198,17 +194,27 @@ class QuaiService {
       return ts;
     }, 'getBlockTimestamp');
 
-    // Cache the result (with LRU eviction)
-    if (this.timestampCache.size >= config.cache.timestampCacheSize) {
-      // Delete the oldest entry (first key in Map)
-      const oldestKey = this.timestampCache.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.timestampCache.delete(oldestKey);
-      }
-    }
     this.timestampCache.set(blockNumber, timestamp);
-
     return timestamp;
+  }
+
+  /**
+   * Fetch a block by number, returning its hash for reorg detection.
+   */
+  async getBlock(blockNumber: number): Promise<{ hash: string; parentHash: string[] } | null> {
+    await this.rateLimiter.acquire();
+    return this.withTrackedRetry(async () => {
+      const block = await withTimeout(
+        this.provider.getBlock(Shard.Cyprus1, blockNumber),
+        config.rpcTimeout.callTimeoutMs,
+        'getBlock'
+      );
+      if (!block) return null;
+      return {
+        hash: block.hash!,
+        parentHash: block.header.parentHash,
+      };
+    }, 'getBlock');
   }
 
   async subscribeToEvents(

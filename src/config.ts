@@ -53,6 +53,8 @@ export const config = {
     pollInterval: parseIntWithBounds(process.env.POLL_INTERVAL, 5000, 1000, 60000, 'POLL_INTERVAL'),
     startBlock: parseIntWithBounds(process.env.START_BLOCK, 0, 0, Number.MAX_SAFE_INTEGER, 'START_BLOCK'),
     confirmations: parseIntWithBounds(process.env.CONFIRMATIONS, 2, 0, 100, 'CONFIRMATIONS'),
+    getLogsChunkSize: parseIntWithBounds(process.env.GET_LOGS_CHUNK_SIZE, 100, 10, 1000, 'GET_LOGS_CHUNK_SIZE'),
+    walletWarningThreshold: parseIntWithBounds(process.env.WALLET_WARNING_THRESHOLD, 500000, 1000, 10000000, 'WALLET_WARNING_THRESHOLD'),
   },
 
   // Health check settings
@@ -71,6 +73,25 @@ export const config = {
   // Caching
   cache: {
     timestampCacheSize: parseIntWithBounds(process.env.TIMESTAMP_CACHE_SIZE, 1000, 10, 100000, 'TIMESTAMP_CACHE_SIZE'),
+  },
+
+  // Circuit breaker
+  circuitBreaker: {
+    failureThreshold: parseIntWithBounds(process.env.CB_FAILURE_THRESHOLD, 10, 1, 100, 'CB_FAILURE_THRESHOLD'),
+    cooldownMs: parseIntWithBounds(process.env.CB_COOLDOWN_MS, 60000, 1000, 600000, 'CB_COOLDOWN_MS'),
+  },
+
+  // RPC call timeout
+  rpcTimeout: {
+    callTimeoutMs: parseIntWithBounds(process.env.RPC_CALL_TIMEOUT_MS, 30000, 5000, 120000, 'RPC_CALL_TIMEOUT_MS'),
+  },
+
+  // Health endpoint rate limiting
+  healthRateLimit: {
+    windowMs: parseIntWithBounds(process.env.HEALTH_RATE_LIMIT_WINDOW_MS, 60000, 1000, 300000, 'HEALTH_RATE_LIMIT_WINDOW_MS'),
+    maxRequests: parseIntWithBounds(process.env.HEALTH_RATE_LIMIT_MAX, 60, 1, 1000, 'HEALTH_RATE_LIMIT_MAX'),
+    maxIPs: parseIntWithBounds(process.env.HEALTH_RATE_LIMIT_MAX_IPS, 10000, 100, 100000, 'HEALTH_RATE_LIMIT_MAX_IPS'),
+    cleanupIntervalMs: parseIntWithBounds(process.env.HEALTH_RATE_LIMIT_CLEANUP_MS, 300000, 10000, 3600000, 'HEALTH_RATE_LIMIT_CLEANUP_MS'),
   },
 
   // Retry settings for resilience

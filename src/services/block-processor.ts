@@ -1,0 +1,142 @@
+import { config } from '../config.js';
+import { quai } from './quai.js';
+import {
+  decodeEvent,
+  getAllEventTopics,
+  getModuleEventTopics,
+  EVENT_SIGNATURES,
+} from './decoder.js';
+import { handleEvent } from '../events/index.js';
+import { logger } from '../utils/logger.js';
+import { getModuleContractAddresses } from '../utils/modules.js';
+import { IndexerLog, DecodedEvent } from '../types/index.js';
+
+/**
+ * Callback context for block processing.
+ * Allows callers to react to discovered wallets without coupling to a specific implementation.
+ */
+export interface BlockProcessorContext {
+  /** Set of lowercase wallet addresses currently being tracked */
+  trackedWallets: Set<string>;
+  /** Called when a new wallet is discovered via factory events */
+  onWalletDiscovered: (address: string, event: DecodedEvent) => void;
+}
+
+/**
+ * Process a range of blocks: fetch factory events, wallet events (chunked),
+ * module events, sort, decode, and handle.
+ *
+ * This is the core indexing logic shared between the real-time indexer and
+ * the standalone backfill script.
+ */
+export async function processBlockRange(
+  fromBlock: number,
+  toBlock: number,
+  ctx: BlockProcessorContext
+): Promise<void> {
+  // 1. Get and process factory events FIRST (new wallet deployments/registrations)
+  const factoryLogs = await quai.getLogs(
+    config.contracts.quaiVaultFactory,
+    [[EVENT_SIGNATURES.WalletCreated, EVENT_SIGNATURES.WalletRegistered]],
+    fromBlock,
+    toBlock
+  );
+
+  for (const log of factoryLogs) {
+    const event = decodeEvent(log);
+    if (event) {
+      await handleEvent(event);
+      if (event.name === 'WalletCreated' || event.name === 'WalletRegistered') {
+        const walletAddress = event.args.wallet as string;
+        ctx.onWalletDiscovered(walletAddress, event);
+      }
+    }
+  }
+
+  // 2. Now fetch wallet and module events (new wallets are now tracked)
+  const allLogs: Array<{
+    log: IndexerLog;
+    priority: number;
+  }> = [];
+
+  // Get events from all tracked wallets (chunked to avoid RPC limits)
+  if (ctx.trackedWallets.size > 0) {
+    const walletAddresses = Array.from(ctx.trackedWallets);
+    const chunkSize = config.indexer.getLogsChunkSize;
+
+    for (let i = 0; i < walletAddresses.length; i += chunkSize) {
+      const chunk = walletAddresses.slice(i, i + chunkSize);
+      const walletLogs = await quai.getLogs(
+        chunk,
+        [getAllEventTopics()],
+        fromBlock,
+        toBlock
+      );
+
+      for (const log of walletLogs) {
+        allLogs.push({ log, priority: 1 });
+      }
+    }
+  }
+
+  // Get events from module contracts
+  const moduleAddresses = getModuleContractAddresses();
+  if (moduleAddresses.length > 0) {
+    const moduleTopics = getModuleEventTopics();
+    logger.debug(
+      { moduleAddresses, topicCount: moduleTopics.length, fromBlock, toBlock },
+      'Querying module contracts for events'
+    );
+
+    const moduleLogs = await quai.getLogs(
+      moduleAddresses,
+      [moduleTopics],
+      fromBlock,
+      toBlock
+    );
+
+    logger.debug(
+      { count: moduleLogs.length, fromBlock, toBlock },
+      'Module logs retrieved'
+    );
+
+    // Build a set for O(1) source validation (defense-in-depth)
+    const moduleAddressSet = new Set(moduleAddresses.map((a) => a.toLowerCase()));
+
+    for (const log of moduleLogs) {
+      // Validate source address — skip logs from unexpected contracts
+      if (!moduleAddressSet.has(log.address.toLowerCase())) {
+        logger.warn(
+          { address: log.address, topic0: log.topics[0], blockNumber: log.blockNumber },
+          'Module log from unexpected address, skipping'
+        );
+        continue;
+      }
+
+      logger.debug(
+        { address: log.address, topic0: log.topics[0], blockNumber: log.blockNumber },
+        'Module log found'
+      );
+      allLogs.push({ log, priority: 2 });
+    }
+  }
+
+  // Sort by block number, then priority, then log index
+  allLogs.sort((a, b) => {
+    if (a.log.blockNumber !== b.log.blockNumber) {
+      return a.log.blockNumber - b.log.blockNumber;
+    }
+    if (a.priority !== b.priority) {
+      return a.priority - b.priority;
+    }
+    return a.log.index - b.log.index;
+  });
+
+  // Process wallet and module events
+  for (const { log } of allLogs) {
+    const event = decodeEvent(log);
+    if (event) {
+      await handleEvent(event);
+    }
+  }
+}

@@ -236,7 +236,7 @@ export function decodeEvent(log: IndexerLog): DecodedEvent | null {
     };
   } catch (error) {
     logger.debug(
-      { eventName, topic0, error: (error as Error).message },
+      { eventName, topic0, err: error },
       'Error decoding event'
     );
     return null;
@@ -245,25 +245,6 @@ export function decodeEvent(log: IndexerLog): DecodedEvent | null {
 
 export function getAllEventTopics(): string[] {
   return Object.values(EVENT_SIGNATURES);
-}
-
-export function getMultisigEventTopics(): string[] {
-  return [
-    EVENT_SIGNATURES.TransactionProposed,
-    EVENT_SIGNATURES.TransactionApproved,
-    EVENT_SIGNATURES.ApprovalRevoked,
-    EVENT_SIGNATURES.TransactionExecuted,
-    EVENT_SIGNATURES.TransactionCancelled,
-    EVENT_SIGNATURES.OwnerAdded,
-    EVENT_SIGNATURES.OwnerRemoved,
-    EVENT_SIGNATURES.ThresholdChanged,
-    EVENT_SIGNATURES.ModuleEnabled,
-    EVENT_SIGNATURES.ModuleDisabled,
-    EVENT_SIGNATURES.Received,
-    // Zodiac IAvatar events
-    EVENT_SIGNATURES.ExecutionFromModuleSuccess,
-    EVENT_SIGNATURES.ExecutionFromModuleFailure,
-  ];
 }
 
 export function getSocialRecoveryEventTopics(): string[] {
@@ -599,8 +580,15 @@ export function decodeMultiSendTransactions(encodedTransactions: string): MultiS
 
   while (offset < data.length) {
     try {
+      // Ensure enough data for the fixed-size header (1 + 20 + 32 + 32 = 85 bytes = 170 hex chars)
+      if (offset + 170 > data.length) break;
+
       // operation: 1 byte (2 hex chars)
       const operation = parseInt(data.slice(offset, offset + 2), 16);
+      if (operation !== 0 && operation !== 1) {
+        logger.warn({ operation, offset }, 'MultiSend: invalid operation type, stopping decode');
+        break;
+      }
       offset += 2;
 
       // to: 20 bytes (40 hex chars)
@@ -614,6 +602,16 @@ export function decodeMultiSendTransactions(encodedTransactions: string): MultiS
       // dataLength: 32 bytes (64 hex chars)
       const dataLength = parseInt(data.slice(offset, offset + 64), 16);
       offset += 64;
+
+      // Bounds check on dataLength
+      if (dataLength < 0 || dataLength > 1_000_000) {
+        logger.warn({ dataLength, offset }, 'MultiSend: unreasonable data length, stopping decode');
+        break;
+      }
+      if (offset + dataLength * 2 > data.length) {
+        logger.warn({ dataLength, offset, dataLen: data.length }, 'MultiSend: data extends past end of buffer, stopping decode');
+        break;
+      }
 
       // data: variable length
       const txData = '0x' + data.slice(offset, offset + dataLength * 2);
