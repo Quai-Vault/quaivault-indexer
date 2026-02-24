@@ -153,7 +153,7 @@ class QuaiService {
         nodeLocation: [0, 0],  // Cyprus1
       });
       return logs.map((log: Log) => ({
-        address: log.address,
+        address: log.address.toLowerCase(),
         topics: Array.from(log.topics),
         data: log.data,
         blockNumber: log.blockNumber,
@@ -190,9 +190,12 @@ class QuaiService {
       if (!block) {
         throw new Error(`Block ${blockNumber} not found`);
       }
-      const ts = parseInt(block.woHeader.timestamp, 16);
+      // woHeader.timestamp is a number at runtime (SDK parses it during formatBlock),
+      // despite the type declaration saying string
+      const raw = block.woHeader.timestamp;
+      const ts = typeof raw === 'string' ? parseInt(raw, 16) : Number(raw);
       if (!Number.isFinite(ts) || ts < 0) {
-        throw new Error(`Invalid timestamp for block ${blockNumber}: ${block.woHeader.timestamp}`);
+        throw new Error(`Invalid timestamp for block ${blockNumber}: ${raw}`);
       }
       return ts;
     }, 'getBlockTimestamp');
