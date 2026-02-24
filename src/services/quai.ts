@@ -1,13 +1,7 @@
-import { quais, FetchRequest } from 'quais';
+import { quais, JsonRpcProvider, Shard, Log, ZeroAddress } from 'quais';
 import { config } from '../config.js';
 import { withRetry } from '../utils/retry.js';
 import { logger } from '../utils/logger.js';
-import {
-  validateBlockNumberResponse,
-  validateLogsResponse,
-  validateCallResponse,
-  validateBlockTimestampResponse,
-} from '../utils/validation.js';
 import { IndexerLog } from '../types/index.js';
 
 // RPC connection health thresholds
@@ -18,7 +12,7 @@ const RPC_HEALTH = {
 
 class QuaiService {
   private wsProvider: quais.WebSocketProvider | null = null;
-  private rpcUrl: string;
+  private provider: JsonRpcProvider;
 
   // Rate limiting state
   private requestTimestamps: number[] = [];
@@ -32,15 +26,12 @@ class QuaiService {
   private consecutiveFailures: number = 0;
 
   constructor() {
-    // FetchRequest needs the full URL with shard path, unlike JsonRpcProvider with usePathing
-    // Auto-append /cyprus1 if not present (base URL pattern for SDK compatibility)
-    const baseUrl = config.quai.rpcUrl;
-    if (baseUrl.match(/\/(cyprus|paxos|hydra)\d+\/?$/i)) {
-      this.rpcUrl = baseUrl;
-    } else {
-      this.rpcUrl = baseUrl.replace(/\/$/, '') + '/cyprus1';
-    }
-    logger.debug({ rpcUrl: this.rpcUrl }, 'QuaiService initialized with RPC URL');
+    this.provider = new JsonRpcProvider(config.quai.rpcUrl, undefined, {
+      usePathing: true,
+      batchMaxCount: 1,   // Disable batching — preserve 1:1 rate limiting
+      cacheTimeout: -1,   // Disable caching — health checks need fresh block numbers
+    });
+    logger.debug({ rpcUrl: config.quai.rpcUrl }, 'QuaiService initialized with JsonRpcProvider');
   }
 
   /**
@@ -134,19 +125,10 @@ class QuaiService {
 
   async getBlockNumber(): Promise<number> {
     await this.rateLimit();
-    return this.withTrackedRetry(async () => {
-      const req = new FetchRequest(this.rpcUrl);
-      req.body = JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'quai_blockNumber',
-        params: [],
-        id: 1,
-      });
-      req.setHeader('Content-Type', 'application/json');
-      const response = await req.send();
-      const json = JSON.parse(response.bodyText);
-      return validateBlockNumberResponse(json);
-    }, 'getBlockNumber');
+    return this.withTrackedRetry(
+      () => this.provider.getBlockNumber(Shard.Cyprus1),
+      'getBlockNumber'
+    );
   }
 
   async getLogs(
@@ -157,43 +139,27 @@ class QuaiService {
   ): Promise<IndexerLog[]> {
     await this.rateLimit();
 
-    // Normalize addresses to lowercase for RPC compatibility
-    // Some RPC providers are case-sensitive when filtering by address
+    // Normalize addresses to lowercase for downstream DB consistency
     const normalizedAddress = Array.isArray(address)
       ? address.map(a => a.toLowerCase())
       : address.toLowerCase();
 
     return this.withTrackedRetry(async () => {
-      const req = new FetchRequest(this.rpcUrl);
-      const params = {
+      const logs = await this.provider.getLogs({
         address: normalizedAddress,
         topics,
-        fromBlock: '0x' + fromBlock.toString(16),
-        toBlock: '0x' + toBlock.toString(16),
-      };
-      req.body = JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'quai_getLogs',
-        params: [params],
-        id: 1,
+        fromBlock,
+        toBlock,
       });
-      req.setHeader('Content-Type', 'application/json');
-      const response = await req.send();
-      const json = JSON.parse(response.bodyText);
-
-      // Validate and parse response with strict schema validation
-      const validatedLogs = validateLogsResponse(json);
-
-      // Convert validated logs to quais.Log format
-      return validatedLogs.map((log) => ({
+      return logs.map((log: Log) => ({
         address: log.address,
-        topics: log.topics,
+        topics: Array.from(log.topics),
         data: log.data,
-        blockNumber: parseInt(log.blockNumber, 16),
+        blockNumber: log.blockNumber,
         transactionHash: log.transactionHash,
-        transactionIndex: parseInt(log.transactionIndex, 16),
+        transactionIndex: log.transactionIndex,
         blockHash: log.blockHash,
-        index: parseInt(log.logIndex, 16),
+        index: log.index,
         removed: log.removed,
       }));
     }, 'getLogs');
@@ -203,18 +169,7 @@ class QuaiService {
     await this.rateLimit();
     return this.withTrackedRetry(async () => {
       const selector = quais.id(functionSignature).slice(0, 10);
-      const req = new FetchRequest(this.rpcUrl);
-      req.body = JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'quai_call',
-        params: [{ to: address, data: selector }, 'latest'],
-        id: 1,
-      });
-      req.setHeader('Content-Type', 'application/json');
-      const response = await req.send();
-      const json = JSON.parse(response.bodyText);
-
-      return validateCallResponse(json);
+      return this.provider.call({ from: ZeroAddress, to: address, data: selector });
     }, 'callContract');
   }
 
@@ -230,18 +185,15 @@ class QuaiService {
 
     await this.rateLimit();
     const timestamp = await this.withTrackedRetry(async () => {
-      const req = new FetchRequest(this.rpcUrl);
-      req.body = JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'quai_getBlockByNumber',
-        params: ['0x' + blockNumber.toString(16), false],
-        id: 1,
-      });
-      req.setHeader('Content-Type', 'application/json');
-      const response = await req.send();
-      const json = JSON.parse(response.bodyText);
-
-      return validateBlockTimestampResponse(json, blockNumber);
+      const block = await this.provider.getBlock(Shard.Cyprus1, blockNumber);
+      if (!block) {
+        throw new Error(`Block ${blockNumber} not found`);
+      }
+      const ts = parseInt(block.woHeader.timestamp, 16);
+      if (!Number.isFinite(ts) || ts < 0) {
+        throw new Error(`Invalid timestamp for block ${blockNumber}: ${block.woHeader.timestamp}`);
+      }
+      return ts;
     }, 'getBlockTimestamp');
 
     // Cache the result (with LRU eviction)
