@@ -87,7 +87,10 @@ export class Indexer {
     // Start real-time indexing
     this.isRunning = true;
     health.setIndexerRunning(true);
-    this.poll();
+    this.poll().catch((err) => {
+      logger.error({ err }, 'Poll loop crashed unexpectedly');
+      process.exit(1);
+    });
   }
 
   async stop(): Promise<void> {
@@ -250,6 +253,8 @@ export class Indexer {
   }
 
   private async poll(): Promise<void> {
+    logger.info('Poll loop started');
+
     while (this.isRunning) {
       // Check circuit breaker before attempting
       if (!this.checkCircuitBreaker()) {
@@ -299,35 +304,45 @@ export class Indexer {
       config.indexer.startBlock
     );
 
-    if (startBlock <= safeBlock) {
-      const blocksToIndex = safeBlock - startBlock + 1;
+    if (startBlock > safeBlock) {
+      logger.info(
+        { lastIndexed: state.lastIndexedBlock, currentBlock, safeBlock, startBlock },
+        'Caught up, waiting for new blocks'
+      );
+      return;
+    }
 
-      // If gap exceeds batch size, use backfill (handles database resets)
-      if (blocksToIndex > config.indexer.batchSize) {
-        logger.info(
-          {
-            lastIndexed: state.lastIndexedBlock,
-            startBlock,
-            safeBlock,
-            blocksToIndex,
-            walletsBeforeRefresh: this.trackedWallets.size,
-            batchSize: config.indexer.batchSize,
-          },
-          'Large gap detected, triggering backfill'
-        );
+    const blocksToIndex = safeBlock - startBlock + 1;
 
-        // Reload tracked wallets using atomic swap pattern
-        // Build new set first, then replace to avoid race condition
-        const wallets = await supabase.getAllWalletAddresses();
-        const newSet = new Set(wallets.map((w) => w.toLowerCase()));
-        this.trackedWallets = newSet;  // Atomic swap
-        health.setTrackedWalletsCount(this.trackedWallets.size);
+    // If gap exceeds batch size, use backfill (handles database resets)
+    if (blocksToIndex > config.indexer.batchSize) {
+      logger.info(
+        {
+          lastIndexed: state.lastIndexedBlock,
+          startBlock,
+          safeBlock,
+          blocksToIndex,
+          walletsBeforeRefresh: this.trackedWallets.size,
+          batchSize: config.indexer.batchSize,
+        },
+        'Large gap detected, triggering backfill'
+      );
 
-        await this.backfill(startBlock, safeBlock);
-      } else {
-        await this.indexBlockRange(startBlock, safeBlock);
-        await supabase.updateIndexerState(safeBlock);
-      }
+      // Reload tracked wallets using atomic swap pattern
+      // Build new set first, then replace to avoid race condition
+      const wallets = await supabase.getAllWalletAddresses();
+      const newSet = new Set(wallets.map((w) => w.toLowerCase()));
+      this.trackedWallets = newSet;  // Atomic swap
+      health.setTrackedWalletsCount(this.trackedWallets.size);
+
+      await this.backfill(startBlock, safeBlock);
+    } else {
+      logger.info(
+        { startBlock, safeBlock, blocksToIndex },
+        'Indexing block range'
+      );
+      await this.indexBlockRange(startBlock, safeBlock);
+      await supabase.updateIndexerState(safeBlock);
     }
   }
 

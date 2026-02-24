@@ -1,6 +1,16 @@
 import { Indexer } from './indexer.js';
 import { logger } from './utils/logger.js';
 
+// Crash on unhandled rejections/exceptions so we don't silently hang
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason }, 'Unhandled promise rejection - exiting');
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, 'Uncaught exception - exiting');
+  process.exit(1);
+});
+
 const indexer = new Indexer();
 let isShuttingDown = false;
 
