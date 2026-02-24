@@ -150,6 +150,7 @@ class QuaiService {
         topics,
         fromBlock,
         toBlock,
+        nodeLocation: [0, 0],  // Cyprus1
       });
       return logs.map((log: Log) => ({
         address: log.address,
