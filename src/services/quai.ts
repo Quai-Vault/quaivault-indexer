@@ -28,8 +28,6 @@ class QuaiService {
   constructor() {
     this.provider = new JsonRpcProvider(config.quai.rpcUrl, undefined, {
       usePathing: true,
-      batchMaxCount: 1,   // Disable batching — preserve 1:1 rate limiting
-      cacheTimeout: -1,   // Disable caching — health checks need fresh block numbers
     });
     logger.debug({ rpcUrl: config.quai.rpcUrl }, 'QuaiService initialized with JsonRpcProvider');
   }
