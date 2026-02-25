@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { isQuaiAddress } from 'quais';
 
 /**
  * Parse an integer from environment variable with bounds validation.
@@ -55,6 +56,7 @@ export const config = {
     confirmations: parseIntWithBounds(process.env.CONFIRMATIONS, 2, 0, 100, 'CONFIRMATIONS'),
     getLogsChunkSize: parseIntWithBounds(process.env.GET_LOGS_CHUNK_SIZE, 100, 10, 1000, 'GET_LOGS_CHUNK_SIZE'),
     walletWarningThreshold: parseIntWithBounds(process.env.WALLET_WARNING_THRESHOLD, 500000, 1000, 10000000, 'WALLET_WARNING_THRESHOLD'),
+    reorgRollbackBlocks: parseIntWithBounds(process.env.REORG_ROLLBACK_BLOCKS, 10, 1, 1000, 'REORG_ROLLBACK_BLOCKS'),
   },
 
   // Health check settings
@@ -94,6 +96,22 @@ export const config = {
     cleanupIntervalMs: parseIntWithBounds(process.env.HEALTH_RATE_LIMIT_CLEANUP_MS, 300000, 10000, 3600000, 'HEALTH_RATE_LIMIT_CLEANUP_MS'),
   },
 
+  // CORS
+  cors: {
+    allowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  },
+
+  // Token tracking
+  tokens: {
+    seedAddresses: (process.env.SEED_TOKEN_ADDRESSES || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  },
+
   // Retry settings for resilience
   retry: {
     maxRetries: parseIntWithBounds(process.env.RETRY_MAX_RETRIES, 5, 1, 20, 'RETRY_MAX_RETRIES'),
@@ -120,6 +138,38 @@ function validateConfig(): void {
       `Missing required environment variables: ${missing.join(', ')}\n` +
         'Please check your .env file or environment configuration.'
     );
+  }
+
+  // Validate schema name (prevents malformed names reaching PostgREST)
+  const schema = process.env.SUPABASE_SCHEMA || 'public';
+  if (!/^[a-z][a-z0-9_]*$/.test(schema)) {
+    throw new Error(
+      `Invalid SUPABASE_SCHEMA: "${schema}" — must be lowercase alphanumeric with underscores, starting with a letter.`
+    );
+  }
+
+  // Validate required contract addresses are valid Quai addresses
+  const requiredContracts: Array<[string, string]> = [
+    ['QUAIVAULT_FACTORY_ADDRESS', process.env.QUAIVAULT_FACTORY_ADDRESS!],
+    ['QUAIVAULT_IMPLEMENTATION_ADDRESS', process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS!],
+  ];
+  for (const [name, address] of requiredContracts) {
+    if (!isQuaiAddress(address)) {
+      throw new Error(`Invalid ${name}: "${address}" is not a valid Quai address.`);
+    }
+  }
+
+  // Validate optional contract addresses if provided
+  const optionalContracts: Array<[string, string | undefined]> = [
+    ['DAILY_LIMIT_MODULE_ADDRESS', process.env.DAILY_LIMIT_MODULE_ADDRESS],
+    ['WHITELIST_MODULE_ADDRESS', process.env.WHITELIST_MODULE_ADDRESS],
+    ['SOCIAL_RECOVERY_MODULE_ADDRESS', process.env.SOCIAL_RECOVERY_MODULE_ADDRESS],
+    ['MULTISEND_ADDRESS', process.env.MULTISEND_ADDRESS],
+  ];
+  for (const [name, address] of optionalContracts) {
+    if (address && !isQuaiAddress(address)) {
+      throw new Error(`Invalid ${name}: "${address}" is not a valid Quai address.`);
+    }
   }
 }
 

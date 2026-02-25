@@ -49,7 +49,9 @@ export class CircuitBreaker {
     this.failures = 0;
     this.state = 'closed';
     if (wasOpen) {
-      this.onStateChange?.(false);
+      try { this.onStateChange?.(false); } catch (err) {
+        logger.warn({ err }, 'Circuit breaker onStateChange callback failed');
+      }
     }
   }
 
@@ -59,7 +61,9 @@ export class CircuitBreaker {
     if (this.failures >= this.failureThreshold) {
       this.state = 'open';
       this.openUntil = Date.now() + this.cooldownMs;
-      this.onStateChange?.(true);
+      try { this.onStateChange?.(true); } catch (err) {
+        logger.warn({ err }, 'Circuit breaker onStateChange callback failed');
+      }
       logger.warn(
         { failures: this.failures, cooldownMs: this.cooldownMs },
         'Circuit breaker opened — pausing operations'

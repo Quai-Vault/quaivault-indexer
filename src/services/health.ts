@@ -7,12 +7,8 @@ import { IpRateLimiter } from '../utils/ip-rate-limiter.js';
 import { withTimeout } from '../utils/timeout.js';
 import { logger } from '../utils/logger.js';
 
-// Allowed CORS origins for health check endpoint
-const ALLOWED_ORIGINS = [
-  'http://localhost:5173',         // Local dev
-  'https://testnet.quaivault.org', // Testnet production
-  'https://quaivault.org',         // Mainnet production
-];
+// Allowed CORS origins for health check endpoint (from CORS_ALLOWED_ORIGINS env var)
+const ALLOWED_ORIGINS = config.cors.allowedOrigins;
 
 // Health check timeout (prevents hanging health checks)
 // Increased to 10s to handle slow/congested RPC endpoints

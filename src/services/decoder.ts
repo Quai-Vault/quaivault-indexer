@@ -62,6 +62,9 @@ export const EVENT_SIGNATURES = {
   WhitelistTransactionExecuted: quais.id(
     'WhitelistTransactionExecuted(address,address,uint256)'
   ),
+
+  // ERC20/ERC721 Transfer (topic only — decoded from raw topics, not via EVENT_ABIS)
+  Transfer: quais.id('Transfer(address,address,uint256)'),
 };
 
 // ABI fragments for decoding
@@ -282,6 +285,10 @@ export function getModuleEventTopics(): string[] {
   ];
 }
 
+export function getTokenTransferTopic(): string {
+  return EVENT_SIGNATURES.Transfer;
+}
+
 // ============================================
 // CALLDATA DECODER FOR TRANSACTION PROPOSALS
 // ============================================
@@ -383,6 +390,35 @@ const FUNCTION_SELECTORS: Record<string, { name: string; abi: string; type: Tran
     name: 'setupRecovery',
     abi: 'function setupRecovery(address wallet, address[] guardians, uint256 threshold, uint256 recoveryPeriod)',
     type: 'recovery_setup',
+  },
+
+  // ERC20 Token Functions
+  [quais.id('transfer(address,uint256)').slice(0, 10)]: {
+    name: 'transfer',
+    abi: 'function transfer(address to, uint256 amount)',
+    type: 'erc20_transfer',
+  },
+  [quais.id('approve(address,uint256)').slice(0, 10)]: {
+    name: 'approve',
+    abi: 'function approve(address spender, uint256 amount)',
+    type: 'erc20_transfer',
+  },
+  [quais.id('transferFrom(address,address,uint256)').slice(0, 10)]: {
+    name: 'transferFrom',
+    abi: 'function transferFrom(address from, address to, uint256 amount)',
+    type: 'erc20_transfer',
+  },
+
+  // ERC721 Token Functions
+  [quais.id('safeTransferFrom(address,address,uint256)').slice(0, 10)]: {
+    name: 'safeTransferFrom',
+    abi: 'function safeTransferFrom(address from, address to, uint256 tokenId)',
+    type: 'erc721_transfer',
+  },
+  [quais.id('safeTransferFrom(address,address,uint256,bytes)').slice(0, 10)]: {
+    name: 'safeTransferFrom',
+    abi: 'function safeTransferFrom(address from, address to, uint256 tokenId, bytes data)',
+    type: 'erc721_transfer',
   },
 };
 
@@ -542,6 +578,18 @@ export function getTransactionDescription(decoded: DecodedCalldata): string {
       return `Module execution with return data to ${args.to} (${args.operation === '0' ? 'Call' : 'DelegateCall'})`;
     case 'multiSend':
       return 'Batched transactions via MultiSend';
+    // ERC20 token functions
+    case 'transfer':
+      return `ERC20 transfer: ${args.amount} to ${args.to}`;
+    case 'approve':
+      return `ERC20 approve: ${args.spender} for ${args.amount}`;
+    case 'transferFrom':
+      return `ERC20 transferFrom: ${args.amount} from ${args.from} to ${args.to}`;
+    // ERC721 token functions
+    case 'safeTransferFrom':
+      return args.data !== undefined
+        ? `ERC721 safeTransferFrom: token #${args.tokenId} from ${args.from} to ${args.to} (with data)`
+        : `ERC721 safeTransferFrom: token #${args.tokenId} from ${args.from} to ${args.to}`;
     default:
       return `${decoded.transactionType}: ${fn}`;
   }

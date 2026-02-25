@@ -49,6 +49,8 @@ export type TransactionType =
   | 'module_execution'   // execTransactionFromModule (Zodiac IAvatar)
   | 'batched_call'       // MultiSend batched transactions
   | 'external_call'      // Generic contract call
+  | 'erc20_transfer'     // ERC20 token operations (transfer, approve, transferFrom)
+  | 'erc721_transfer'    // ERC721 token operations (safeTransferFrom)
   | 'unknown';           // Could not be decoded
 
 // ============================================
@@ -108,6 +110,7 @@ export interface WalletModule {
 
 export interface IndexerState {
   lastIndexedBlock: number;
+  lastBlockHash: string | null;
   lastIndexedAt: Date;
   isSyncing: boolean;
 }
@@ -219,4 +222,31 @@ export interface ModuleExecution {
   dataHash?: string;
   executedAtBlock: number;
   executedAtTx: string;
+}
+
+// ============================================
+// Token Types (ERC20 / ERC721)
+// ============================================
+
+export type TokenStandard = 'ERC20' | 'ERC721';
+
+export interface TokenInfo {
+  address: string;
+  standard: TokenStandard;
+  symbol: string;
+  name: string;
+  decimals: number;
+}
+
+export interface TokenTransfer {
+  tokenAddress: string;
+  walletAddress: string;
+  fromAddress: string;
+  toAddress: string;
+  value: string;
+  tokenId?: string;
+  direction: 'inflow' | 'outflow';
+  blockNumber: number;
+  transactionHash: string;
+  logIndex: number;
 }

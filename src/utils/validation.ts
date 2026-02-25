@@ -84,3 +84,30 @@ export function validateBytes32(hash: unknown, fieldName: string): string {
   }
   return hash.toLowerCase();  // Normalize to lowercase for consistency
 }
+
+/**
+ * Validates and normalizes a token transfer participant address.
+ * Unlike validateAndNormalizeAddress, this does NOT call isQuaiAddress()
+ * because ERC20 mint/burn events use the zero address (0x0000...0000)
+ * and other non-Quai addresses (e.g., 0xdead...) can appear as Transfer participants.
+ *
+ * Validates: 0x-prefixed, 40 hex characters, total length 42.
+ */
+export function normalizeTokenParticipant(address: unknown, fieldName: string): string {
+  if (typeof address !== 'string') {
+    throw new Error(
+      `Invalid ${fieldName}: expected string, got ${typeof address}`
+    );
+  }
+  if (address.length !== 42 || !address.startsWith('0x')) {
+    throw new Error(
+      `Invalid ${fieldName}: expected 0x-prefixed 40-character hex string, got "${address}"`
+    );
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    throw new Error(
+      `Invalid ${fieldName}: contains non-hex characters, got "${address}"`
+    );
+  }
+  return address.toLowerCase();
+}

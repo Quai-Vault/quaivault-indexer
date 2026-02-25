@@ -15,10 +15,14 @@ import type {
   WhitelistEntry,
   ModuleTransaction,
   ModuleExecution,
+  TokenInfo,
+  TokenTransfer,
+  TokenStandard,
 } from '../types/index.js';
 import {
   validateAndNormalizeAddress,
   validateBytes32,
+  normalizeTokenParticipant,
 } from '../utils/validation.js';
 
 /**
@@ -46,6 +50,17 @@ class SupabaseService {
     });
   }
 
+  /**
+   * Wrap a Supabase error with operation context for debuggability.
+   * Preserves the original error code for duplicate detection (23505).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private fail(operation: string, error: any): never {
+    const wrapped = new Error(`${operation}: ${error.message || JSON.stringify(error)}`);
+    (wrapped as any).code = error.code;
+    throw wrapped;
+  }
+
   // ============================================
   // INDEXER STATE
   // ============================================
@@ -57,25 +72,31 @@ class SupabaseService {
       .eq('id', 'main')
       .single();
 
-    if (error) throw error;
+    if (error) throw new Error(`Failed to get indexer state: ${error.message}`);
 
     return {
       lastIndexedBlock: data.last_indexed_block,
+      lastBlockHash: data.last_block_hash ?? null,
       lastIndexedAt: new Date(data.last_indexed_at),
       isSyncing: data.is_syncing,
     };
   }
 
-  async updateIndexerState(blockNumber: number): Promise<void> {
+  async updateIndexerState(blockNumber: number, blockHash?: string): Promise<void> {
+    const update: Record<string, unknown> = {
+      last_indexed_block: blockNumber,
+      last_indexed_at: new Date().toISOString(),
+    };
+    if (blockHash !== undefined) {
+      update.last_block_hash = blockHash;
+    }
+
     const { error } = await this.client
       .from('indexer_state')
-      .update({
-        last_indexed_block: blockNumber,
-        last_indexed_at: new Date().toISOString(),
-      })
+      .update(update)
       .eq('id', 'main');
 
-    if (error) throw error;
+    if (error) throw new Error(`Failed to update indexer state to block ${blockNumber}: ${error.message}`);
   }
 
   async setIsSyncing(isSyncing: boolean): Promise<void> {
@@ -84,7 +105,7 @@ class SupabaseService {
       .update({ is_syncing: isSyncing })
       .eq('id', 'main');
 
-    if (error) throw error;
+    if (error) this.fail('setIsSyncing', error);
   }
 
   // ============================================
@@ -109,7 +130,7 @@ class SupabaseService {
       }
     );
 
-    if (error) throw error;
+    if (error) this.fail('upsertWallet', error);
   }
 
   async getWallet(address: string): Promise<Wallet | null> {
@@ -121,7 +142,7 @@ class SupabaseService {
       .eq('address', normalizedAddress)
       .single();
 
-    if (error && error.code !== 'PGRST116') throw error;
+    if (error && error.code !== 'PGRST116') this.fail('getWallet', error);
     if (!data) return null;
 
     return {
@@ -146,7 +167,7 @@ class SupabaseService {
         .select('address')
         .range(offset, offset + PAGE_SIZE - 1);
 
-      if (error) throw error;
+      if (error) this.fail('getAllWalletAddresses', error);
       if (!data || data.length === 0) break;
 
       for (const w of data) {
@@ -170,7 +191,7 @@ class SupabaseService {
       .update({ threshold })
       .eq('address', normalizedAddress);
 
-    if (error) throw error;
+    if (error) this.fail('updateWalletThreshold', error);
   }
 
   async updateWalletOwnerCount(address: string, delta: number): Promise<void> {
@@ -181,7 +202,7 @@ class SupabaseService {
       delta_value: delta,
     });
 
-    if (error) throw error;
+    if (error) this.fail('updateWalletOwnerCount', error);
   }
 
   // ============================================
@@ -201,7 +222,7 @@ class SupabaseService {
       is_active: true,
     });
 
-    if (error && error.code !== '23505') throw error; // Ignore duplicate
+    if (error && error.code !== '23505') this.fail('addOwner', error); // Ignore duplicate
   }
 
   async addOwnersBatch(owners: WalletOwner[]): Promise<void> {
@@ -223,7 +244,7 @@ class SupabaseService {
         ignoreDuplicates: true,
       });
 
-    if (error) throw error;
+    if (error) this.fail('addOwnersBatch', error);
   }
 
   async removeOwner(
@@ -247,7 +268,7 @@ class SupabaseService {
       .eq('owner_address', normalizedOwner)
       .eq('is_active', true);
 
-    if (error) throw error;
+    if (error) this.fail('removeOwner', error);
   }
 
   // ============================================
@@ -270,7 +291,7 @@ class SupabaseService {
       { onConflict: 'wallet_address,module_address' }
     );
 
-    if (error) throw error;
+    if (error) this.fail('addModule', error);
   }
 
   async disableModule(
@@ -294,7 +315,7 @@ class SupabaseService {
       .eq('module_address', normalizedModule)
       .eq('is_active', true);
 
-    if (error) throw error;
+    if (error) this.fail('disableModule', error);
   }
 
   // ============================================
@@ -332,7 +353,7 @@ class SupabaseService {
       }
     );
 
-    if (error) throw error;
+    if (error) this.fail('upsertTransaction', error);
   }
 
   async updateTransactionStatus(
@@ -366,7 +387,7 @@ class SupabaseService {
       .eq('wallet_address', normalizedWallet)
       .eq('tx_hash', normalizedTxHash);
 
-    if (error) throw error;
+    if (error) this.fail('updateTransactionStatus', error);
   }
 
   // ============================================
@@ -388,7 +409,7 @@ class SupabaseService {
       is_active: true,
     });
 
-    if (error && error.code !== '23505') throw error; // Ignore duplicate
+    if (error && error.code !== '23505') this.fail('addConfirmation', error); // Ignore duplicate
   }
 
   async revokeConfirmation(
@@ -415,7 +436,7 @@ class SupabaseService {
       .eq('owner_address', normalizedOwner)
       .eq('is_active', true);
 
-    if (error) throw error;
+    if (error) this.fail('revokeConfirmation', error);
   }
 
   // ============================================
@@ -445,7 +466,7 @@ class SupabaseService {
         { onConflict: 'wallet_address' }
       );
 
-    if (configError) throw configError;
+    if (configError) this.fail('upsertRecoveryConfig', configError);
 
     // Guardian transition: deactivate old, insert new.
     // Use compensating action to re-activate old guardians if insert fails.
@@ -454,7 +475,7 @@ class SupabaseService {
       .update({ is_active: false })
       .eq('wallet_address', walletAddress);
 
-    if (deactivateError) throw deactivateError;
+    if (deactivateError) this.fail('upsertRecoveryConfig/deactivateGuardians', deactivateError);
 
     if (normalizedGuardians.length > 0) {
       const guardianRecords = normalizedGuardians.map((guardian) => ({
@@ -476,7 +497,7 @@ class SupabaseService {
           .from('social_recovery_guardians')
           .update({ is_active: true })
           .eq('wallet_address', walletAddress);
-        throw guardianError;
+        this.fail('upsertRecoveryConfig/insertGuardians', guardianError);
       }
     }
   }
@@ -513,7 +534,7 @@ class SupabaseService {
       { onConflict: 'wallet_address,recovery_hash' }
     );
 
-    if (error) throw error;
+    if (error) this.fail('upsertRecovery', error);
   }
 
   async addRecoveryApproval(approval: SocialRecoveryApproval): Promise<void> {
@@ -535,7 +556,7 @@ class SupabaseService {
         is_active: true,
       });
 
-    if (error && error.code !== '23505') throw error;
+    if (error && error.code !== '23505') this.fail('addRecoveryApproval', error);
   }
 
   async revokeRecoveryApproval(
@@ -564,7 +585,7 @@ class SupabaseService {
       .eq('guardian_address', normalizedGuardian)
       .eq('is_active', true);
 
-    if (error) throw error;
+    if (error) this.fail('revokeRecoveryApproval', error);
   }
 
   async updateRecoveryStatus(
@@ -594,7 +615,7 @@ class SupabaseService {
       .eq('wallet_address', normalizedWallet)
       .eq('recovery_hash', normalizedRecoveryHash);
 
-    if (error) throw error;
+    if (error) this.fail('updateRecoveryStatus', error);
   }
 
   async getRecoveryConfig(
@@ -608,7 +629,7 @@ class SupabaseService {
       .eq('wallet_address', normalizedWallet)
       .single();
 
-    if (error && error.code !== 'PGRST116') throw error;
+    if (error && error.code !== 'PGRST116') this.fail('getRecoveryConfig', error);
     if (!data) return null;
 
     return {
@@ -634,7 +655,7 @@ class SupabaseService {
       { onConflict: 'wallet_address' }
     );
 
-    if (error) throw error;
+    if (error) this.fail('upsertDailyLimit', error);
   }
 
   async resetDailyLimit(walletAddress: string): Promise<void> {
@@ -648,7 +669,7 @@ class SupabaseService {
       })
       .eq('wallet_address', normalizedWallet);
 
-    if (error) throw error;
+    if (error) this.fail('resetDailyLimit', error);
   }
 
   async updateDailyLimitSpent(
@@ -664,7 +685,7 @@ class SupabaseService {
       .eq('wallet_address', normalizedWallet)
       .single();
 
-    if (fetchError && fetchError.code !== 'PGRST116') throw fetchError;
+    if (fetchError && fetchError.code !== 'PGRST116') this.fail('updateDailyLimitSpent/fetch', fetchError);
     if (!data) {
       // No daily limit configured for this wallet - this is expected for wallets
       // without the DailyLimit module enabled
@@ -682,7 +703,7 @@ class SupabaseService {
       .update({ spent_today: spent })
       .eq('wallet_address', normalizedWallet);
 
-    if (error) throw error;
+    if (error) this.fail('updateDailyLimitSpent', error);
     return { updated: true };
   }
 
@@ -704,7 +725,7 @@ class SupabaseService {
       is_active: true,
     });
 
-    if (error && error.code !== '23505') throw error;
+    if (error && error.code !== '23505') this.fail('addWhitelistEntry', error);
   }
 
   async removeWhitelistEntry(
@@ -728,7 +749,7 @@ class SupabaseService {
       .eq('whitelisted_address', normalizedWhitelisted)
       .eq('is_active', true);
 
-    if (error) throw error;
+    if (error) this.fail('removeWhitelistEntry', error);
   }
 
   // ============================================
@@ -752,7 +773,7 @@ class SupabaseService {
       executed_at_tx: executedAtTx,
     });
 
-    if (error && error.code !== '23505') throw error; // Ignore duplicates
+    if (error && error.code !== '23505') this.fail('addModuleTransaction', error); // Ignore duplicates
   }
 
   // ============================================
@@ -788,7 +809,7 @@ class SupabaseService {
 
     const { error } = await this.client.from('module_executions').insert(record);
 
-    if (error && error.code !== '23505') throw error; // Ignore duplicates
+    if (error && error.code !== '23505') this.fail('addModuleExecution', error); // Ignore duplicates
   }
 
   async getModuleExecutions(
@@ -818,7 +839,7 @@ class SupabaseService {
 
     const { data, error } = await query;
 
-    if (error) throw error;
+    if (error) this.fail('getModuleExecutions', error);
     if (!data) return [];
 
     return data.map((row: Record<string, unknown>) => ({
@@ -857,7 +878,82 @@ class SupabaseService {
       deposited_at_tx: depositedAtTx,
     });
 
-    if (error && error.code !== '23505') throw error; // Ignore duplicates
+    if (error && error.code !== '23505') this.fail('addDeposit', error); // Ignore duplicates
+  }
+
+  // ============================================
+  // TOKEN TRACKING
+  // ============================================
+
+  async upsertToken(
+    token: TokenInfo & { discoveredAtBlock?: number; discoveredVia?: string }
+  ): Promise<void> {
+    const address = validateAndNormalizeAddress(token.address, 'token.address');
+
+    const { error } = await this.client.from('tokens').upsert(
+      {
+        address,
+        standard: token.standard,
+        symbol: token.symbol,
+        name: token.name,
+        decimals: token.decimals,
+        discovered_at_block: token.discoveredAtBlock ?? null,
+        discovered_via: token.discoveredVia ?? null,
+      },
+      { onConflict: 'address' }
+    );
+
+    if (error) this.fail('upsertToken', error);
+  }
+
+  async getAllTokens(): Promise<Array<{ address: string; standard: TokenStandard }>> {
+    const { data, error } = await this.client
+      .from('tokens')
+      .select('address, standard');
+
+    if (error) this.fail('getAllTokens', error);
+    return data || [];
+  }
+
+  async getTokenByAddress(
+    address: string
+  ): Promise<{ address: string; standard: TokenStandard; symbol: string; decimals: number; name: string } | null> {
+    const normalized = validateAndNormalizeAddress(address, 'tokenAddress');
+
+    const { data, error } = await this.client
+      .from('tokens')
+      .select('address, standard, symbol, decimals, name')
+      .eq('address', normalized)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') return null; // Not found
+      this.fail('getTokenByAddress', error);
+    }
+    return data;
+  }
+
+  async addTokenTransfer(transfer: TokenTransfer): Promise<void> {
+    const tokenAddress = validateAndNormalizeAddress(transfer.tokenAddress, 'transfer.tokenAddress');
+    const walletAddress = validateAndNormalizeAddress(transfer.walletAddress, 'transfer.walletAddress');
+    const fromAddress = normalizeTokenParticipant(transfer.fromAddress, 'transfer.fromAddress');
+    const toAddress = normalizeTokenParticipant(transfer.toAddress, 'transfer.toAddress');
+    const transactionHash = validateBytes32(transfer.transactionHash, 'transfer.transactionHash');
+
+    const { error } = await this.client.from('token_transfers').insert({
+      token_address: tokenAddress,
+      wallet_address: walletAddress,
+      from_address: fromAddress,
+      to_address: toAddress,
+      value: transfer.value,
+      token_id: transfer.tokenId ?? null,
+      direction: transfer.direction,
+      block_number: transfer.blockNumber,
+      transaction_hash: transactionHash,
+      log_index: transfer.logIndex,
+    });
+
+    if (error && error.code !== '23505') this.fail('addTokenTransfer', error); // Ignore duplicates
   }
 }
 

@@ -96,6 +96,38 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END
 $$;
 
+DO $$
+BEGIN
+    -- Add 'erc20_transfer' to transaction_type enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'erc20_transfer'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_type')
+    ) THEN
+        ALTER TYPE public.transaction_type ADD VALUE 'erc20_transfer';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Token standard enum (ERC20, ERC721)
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'token_standard') THEN
+        CREATE TYPE public.token_standard AS ENUM ('ERC20', 'ERC721');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Transfer direction enum
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'transfer_direction') THEN
+        CREATE TYPE public.transfer_direction AS ENUM ('inflow', 'outflow');
+    END IF;
+END
+$$;
+
 -- ============================================
 -- DROP NETWORK SCHEMA FUNCTION
 -- ============================================
@@ -106,9 +138,28 @@ RETURNS void AS $$
 DECLARE
     schema_name TEXT := network_name;
 BEGIN
-    -- Drop the entire schema cascade (removes all tables, functions, etc.)
-    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', schema_name);
-    RAISE NOTICE 'Schema "%" dropped successfully', schema_name;
+    -- Drop only QuaiVault indexer tables (not the entire schema).
+    -- Other projects (e.g. qdl-indexer) may share the same schema.
+    -- Order: children before parents (FK dependencies).
+    EXECUTE format('DROP TABLE IF EXISTS %I.token_transfers CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.tokens CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.social_recovery_approvals CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.social_recoveries CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.social_recovery_guardians CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.social_recovery_configs CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.module_executions CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.module_transactions CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.whitelist_entries CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.daily_limit_state CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.deposits CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.wallet_modules CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.confirmations CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.transactions CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.wallet_owners CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.wallets CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.indexer_state CASCADE', schema_name);
+
+    RAISE NOTICE 'QuaiVault indexer tables dropped from schema "%"', schema_name;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -235,6 +286,7 @@ BEGIN
         CREATE TABLE IF NOT EXISTS %I.indexer_state (
             id TEXT PRIMARY KEY DEFAULT ''main'',
             last_indexed_block BIGINT NOT NULL DEFAULT 0,
+            last_block_hash TEXT,
             last_indexed_at TIMESTAMPTZ,
             is_syncing BOOLEAN DEFAULT FALSE,
             updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -392,6 +444,42 @@ BEGIN
         )', schema_name, schema_name);
 
     -- ============================================
+    -- TOKEN TRACKING TABLES
+    -- ============================================
+
+    -- Token registry (ERC20/ERC721 contracts tracked by the indexer)
+    EXECUTE format('
+        CREATE TABLE IF NOT EXISTS %I.tokens (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            address TEXT UNIQUE NOT NULL,
+            standard public.token_standard NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT NOT NULL,
+            decimals INTEGER NOT NULL,
+            discovered_at_block BIGINT,
+            discovered_via TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )', schema_name);
+
+    -- Token transfer events (ERC20/ERC721 transfers involving tracked vaults)
+    EXECUTE format('
+        CREATE TABLE IF NOT EXISTS %I.token_transfers (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            token_address TEXT NOT NULL REFERENCES %I.tokens(address),
+            wallet_address TEXT NOT NULL REFERENCES %I.wallets(address) ON DELETE CASCADE,
+            from_address TEXT NOT NULL,
+            to_address TEXT NOT NULL,
+            value TEXT NOT NULL,
+            token_id TEXT,
+            direction public.transfer_direction NOT NULL,
+            block_number BIGINT NOT NULL,
+            transaction_hash TEXT NOT NULL,
+            log_index INTEGER NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(transaction_hash, log_index, wallet_address)
+        )', schema_name, schema_name, schema_name);
+
+    -- ============================================
     -- INDEXES
     -- ============================================
 
@@ -416,6 +504,12 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_module_executions_wallet ON %I.module_executions(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_module_executions_module ON %I.module_executions(module_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_module_executions_success ON %I.module_executions(wallet_address, success)', schema_name);
+
+    -- Token tracking indexes
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_token_transfers_wallet ON %I.token_transfers(wallet_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_token_transfers_token ON %I.token_transfers(token_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_token_transfers_wallet_token ON %I.token_transfers(wallet_address, token_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_token_transfers_block ON %I.token_transfers(block_number)', schema_name);
 
     -- ============================================
     -- FUNCTIONS & TRIGGERS
@@ -523,6 +617,8 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.social_recoveries ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.social_recovery_approvals ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.indexer_state ENABLE ROW LEVEL SECURITY', schema_name);
+    EXECUTE format('ALTER TABLE %I.tokens ENABLE ROW LEVEL SECURITY', schema_name);
+    EXECUTE format('ALTER TABLE %I.token_transfers ENABLE ROW LEVEL SECURITY', schema_name);
 
     -- Public read policies
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.wallets', schema_name);
@@ -555,6 +651,10 @@ BEGIN
     EXECUTE format('CREATE POLICY "Public read access" ON %I.social_recovery_approvals FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.indexer_state', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.indexer_state FOR SELECT USING (true)', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.tokens', schema_name);
+    EXECUTE format('CREATE POLICY "Public read access" ON %I.tokens FOR SELECT USING (true)', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.token_transfers', schema_name);
+    EXECUTE format('CREATE POLICY "Public read access" ON %I.token_transfers FOR SELECT USING (true)', schema_name);
 
     -- Service role write policies (with WITH CHECK for INSERT/UPDATE)
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.wallets', schema_name);
@@ -587,6 +687,10 @@ BEGIN
     EXECUTE format('CREATE POLICY "Service write access" ON %I.social_recovery_approvals FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.indexer_state', schema_name);
     EXECUTE format('CREATE POLICY "Service write access" ON %I.indexer_state FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.tokens', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.tokens FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.token_transfers', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.token_transfers FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
 
     -- ============================================
     -- GRANT PERMISSIONS
@@ -680,6 +784,16 @@ BEGIN
 
     BEGIN
         EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.indexer_state', schema_name);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+
+    BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.tokens', schema_name);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+
+    BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.token_transfers', schema_name);
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
 

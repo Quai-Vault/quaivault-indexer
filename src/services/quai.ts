@@ -217,6 +217,94 @@ class QuaiService {
     }, 'getBlock');
   }
 
+  /**
+   * Probe a contract for ERC20 metadata by calling symbol(), decimals(), name().
+   * Returns null if any call fails (contract is not ERC20 or reverted).
+   * Sanitizes returned metadata to prevent malicious contract responses.
+   */
+  async getERC20Metadata(contractAddress: string): Promise<{
+    symbol: string;
+    decimals: number;
+    name: string;
+  } | null> {
+    try {
+      const [symbolRaw, decimalsRaw, nameRaw] = await Promise.all([
+        this.callContract(contractAddress, 'symbol()'),
+        this.callContract(contractAddress, 'decimals()'),
+        this.callContract(contractAddress, 'name()'),
+      ]);
+
+      // Decode ABI-encoded string responses
+      const abiCoder = quais.AbiCoder.defaultAbiCoder();
+      const symbol = abiCoder.decode(['string'], symbolRaw)[0] as string;
+      const name = abiCoder.decode(['string'], nameRaw)[0] as string;
+      const decimals = Number(abiCoder.decode(['uint8'], decimalsRaw)[0]);
+
+      // Sanitize metadata to prevent malicious contract responses.
+      // Symbol: alphanumeric + common token chars only (prevents Unicode homograph attacks)
+      // Name: printable ASCII (more permissive since names are descriptive, not identifiers)
+      const sanitizedSymbol = symbol
+        .replace(/[^a-zA-Z0-9.\-_]/g, '')
+        .slice(0, 32);
+      const sanitizedName = name
+        .replace(/[^\x20-\x7E]/g, '')
+        .slice(0, 128);
+
+      if (!sanitizedSymbol || !sanitizedName) {
+        logger.debug({ contractAddress }, 'ERC20 probe returned empty symbol or name');
+        return null;
+      }
+
+      if (!Number.isInteger(decimals) || decimals < 0 || decimals > 77) {
+        logger.debug({ contractAddress, decimals }, 'ERC20 probe returned invalid decimals');
+        return null;
+      }
+
+      return { symbol: sanitizedSymbol, decimals, name: sanitizedName };
+    } catch {
+      // Contract doesn't implement ERC20 metadata or reverted
+      return null;
+    }
+  }
+
+  /**
+   * Probe a contract for ERC721 metadata by calling symbol() and name().
+   * Returns null if any call fails (contract is not ERC721 or reverted).
+   * Sanitizes returned metadata to prevent malicious contract responses.
+   */
+  async getERC721Metadata(contractAddress: string): Promise<{
+    symbol: string;
+    name: string;
+  } | null> {
+    try {
+      const [symbolRaw, nameRaw] = await Promise.all([
+        this.callContract(contractAddress, 'symbol()'),
+        this.callContract(contractAddress, 'name()'),
+      ]);
+
+      const abiCoder = quais.AbiCoder.defaultAbiCoder();
+      const symbol = abiCoder.decode(['string'], symbolRaw)[0] as string;
+      const name = abiCoder.decode(['string'], nameRaw)[0] as string;
+
+      const sanitizedSymbol = symbol
+        .replace(/[^a-zA-Z0-9.\-_]/g, '')
+        .slice(0, 32);
+      const sanitizedName = name
+        .replace(/[^\x20-\x7E]/g, '')
+        .slice(0, 128);
+
+      if (!sanitizedSymbol || !sanitizedName) {
+        logger.debug({ contractAddress }, 'ERC721 probe returned empty symbol or name');
+        return null;
+      }
+
+      return { symbol: sanitizedSymbol, name: sanitizedName };
+    } catch {
+      // Contract doesn't implement ERC721 metadata or reverted
+      return null;
+    }
+  }
+
   async subscribeToEvents(
     addresses: string[],
     topics: string[],

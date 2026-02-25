@@ -143,6 +143,12 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
         await handleWhitelistTransactionExecuted(event);
         break;
 
+      // Token Transfer events are handled directly by the block processor
+      // via handleTokenTransfer(). If one reaches here, log and skip.
+      case 'Transfer':
+        logger.debug({ address: event.address }, 'Transfer event reached dispatcher (handled by block processor)');
+        break;
+
       default:
         logger.debug({ event: event.name }, 'Unhandled event');
     }

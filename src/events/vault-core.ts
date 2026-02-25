@@ -4,6 +4,7 @@
 
 import type { DecodedEvent } from '../types/index.js';
 import { supabase } from '../services/supabase.js';
+import { quai } from '../services/quai.js';
 import { logger } from '../utils/logger.js';
 import { decodeCalldata, getTransactionDescription } from '../services/decoder.js';
 import { validateEventArgs } from './helpers.js';
@@ -19,6 +20,60 @@ export async function handleTransactionProposed(event: DecodedEvent): Promise<vo
 
   const decoded = decodeCalldata(to, data || '0x', value);
   const description = getTransactionDescription(decoded);
+
+  // Auto-discover tokens from vault proposals
+  if (decoded.transactionType === 'erc20_transfer' || decoded.transactionType === 'erc721_transfer') {
+    try {
+      const tokenAddress = to.toLowerCase();
+      const existing = await supabase.getTokenByAddress(tokenAddress);
+      if (!existing) {
+        if (decoded.transactionType === 'erc721_transfer') {
+          // safeTransferFrom is ERC721-specific — probe for NFT metadata directly
+          const metadata = await quai.getERC721Metadata(tokenAddress);
+          if (metadata) {
+            await supabase.upsertToken({
+              address: tokenAddress,
+              standard: 'ERC721',
+              ...metadata,
+              decimals: 0,
+              discoveredAtBlock: event.blockNumber,
+              discoveredVia: 'calldata',
+            });
+            logger.info({ token: tokenAddress, symbol: metadata.symbol }, 'Auto-discovered ERC721 token');
+          }
+        } else {
+          // Shared selectors (transfer, approve, transferFrom) — try ERC20 first, fall back to ERC721
+          const erc20Meta = await quai.getERC20Metadata(tokenAddress);
+          if (erc20Meta) {
+            await supabase.upsertToken({
+              address: tokenAddress,
+              standard: 'ERC20',
+              ...erc20Meta,
+              discoveredAtBlock: event.blockNumber,
+              discoveredVia: 'calldata',
+            });
+            logger.info({ token: tokenAddress, symbol: erc20Meta.symbol }, 'Auto-discovered ERC20 token');
+          } else {
+            // ERC20 probe failed (no decimals()) — try ERC721 fallback
+            const erc721Meta = await quai.getERC721Metadata(tokenAddress);
+            if (erc721Meta) {
+              await supabase.upsertToken({
+                address: tokenAddress,
+                standard: 'ERC721',
+                ...erc721Meta,
+                decimals: 0,
+                discoveredAtBlock: event.blockNumber,
+                discoveredVia: 'calldata',
+              });
+              logger.info({ token: tokenAddress, symbol: erc721Meta.symbol }, 'Auto-discovered ERC721 token (via ERC20 fallback)');
+            }
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, to }, 'Token auto-discovery failed, continuing');
+    }
+  }
 
   await supabase.upsertTransaction({
     walletAddress: event.address,

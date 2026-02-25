@@ -4,12 +4,14 @@ import {
   decodeEvent,
   getAllEventTopics,
   getModuleEventTopics,
+  getTokenTransferTopic,
   EVENT_SIGNATURES,
 } from './decoder.js';
 import { handleEvent } from '../events/index.js';
+import { handleTokenTransfer } from '../events/token-transfer.js';
 import { logger } from '../utils/logger.js';
 import { getModuleContractAddresses } from '../utils/modules.js';
-import { IndexerLog, DecodedEvent } from '../types/index.js';
+import { IndexerLog, DecodedEvent, TokenStandard } from '../types/index.js';
 
 /**
  * Callback context for block processing.
@@ -18,13 +20,15 @@ import { IndexerLog, DecodedEvent } from '../types/index.js';
 export interface BlockProcessorContext {
   /** Set of lowercase wallet addresses currently being tracked */
   trackedWallets: Set<string>;
+  /** Map of lowercase token addresses to their standard (ERC20/ERC721) */
+  trackedTokens: Map<string, TokenStandard>;
   /** Called when a new wallet is discovered via factory events */
   onWalletDiscovered: (address: string, event: DecodedEvent) => void;
 }
 
 /**
  * Process a range of blocks: fetch factory events, wallet events (chunked),
- * module events, sort, decode, and handle.
+ * module events, token transfer events, sort, decode, and handle.
  *
  * This is the core indexing logic shared between the real-time indexer and
  * the standalone backfill script.
@@ -63,12 +67,13 @@ export async function processBlockRange(
   if (ctx.trackedWallets.size > 0) {
     const walletAddresses = Array.from(ctx.trackedWallets);
     const chunkSize = config.indexer.getLogsChunkSize;
+    const eventTopics = [getAllEventTopics()];
 
     for (let i = 0; i < walletAddresses.length; i += chunkSize) {
       const chunk = walletAddresses.slice(i, i + chunkSize);
       const walletLogs = await quai.getLogs(
         chunk,
-        [getAllEventTopics()],
+        eventTopics,
         fromBlock,
         toBlock
       );
@@ -121,6 +126,34 @@ export async function processBlockRange(
     }
   }
 
+  // 3. Get Transfer events from tracked token contracts (chunked)
+  if (ctx.trackedTokens.size > 0 && ctx.trackedWallets.size > 0) {
+    const tokenAddresses = Array.from(ctx.trackedTokens.keys());
+    const chunkSize = config.indexer.getLogsChunkSize;
+    const transferTopic = getTokenTransferTopic();
+
+    for (let i = 0; i < tokenAddresses.length; i += chunkSize) {
+      const chunk = tokenAddresses.slice(i, i + chunkSize);
+      const tokenLogs = await quai.getLogs(
+        chunk,
+        [[transferTopic]],
+        fromBlock,
+        toBlock
+      );
+
+      // Client-side filter: only keep logs where from or to is a tracked vault
+      for (const log of tokenLogs) {
+        if (log.topics.length < 3) continue;
+        const from = ('0x' + log.topics[1].slice(26)).toLowerCase();
+        const to = ('0x' + log.topics[2].slice(26)).toLowerCase();
+
+        if (ctx.trackedWallets.has(from) || ctx.trackedWallets.has(to)) {
+          allLogs.push({ log, priority: 3 });
+        }
+      }
+    }
+  }
+
   // Sort by block number, then priority, then log index
   allLogs.sort((a, b) => {
     if (a.log.blockNumber !== b.log.blockNumber) {
@@ -132,11 +165,19 @@ export async function processBlockRange(
     return a.log.index - b.log.index;
   });
 
-  // Process wallet and module events
-  for (const { log } of allLogs) {
-    const event = decodeEvent(log);
-    if (event) {
-      await handleEvent(event);
+  // Process all events
+  for (const { log, priority } of allLogs) {
+    if (priority === 3) {
+      // Token transfer — dispatch directly, bypassing decodeEvent/handleEvent
+      const standard = ctx.trackedTokens.get(log.address.toLowerCase());
+      if (standard) {
+        await handleTokenTransfer(log, standard, ctx.trackedWallets);
+      }
+    } else {
+      const event = decodeEvent(log);
+      if (event) {
+        await handleEvent(event);
+      }
     }
   }
 }

@@ -3,6 +3,7 @@ import { quai } from './services/quai.js';
 import { supabase } from './services/supabase.js';
 import { processBlockRange } from './services/block-processor.js';
 import { logger } from './utils/logger.js';
+import type { TokenStandard } from './types/index.js';
 
 /**
  * Standalone backfill script for historical data indexing.
@@ -33,6 +34,30 @@ async function backfill(): Promise<void> {
   existingWallets.forEach((w) => trackedWallets.add(w.toLowerCase()));
   logger.info({ count: trackedWallets.size }, 'Loaded existing wallets');
 
+  // Seed known tokens from config (resolve metadata via RPC)
+  for (const address of config.tokens.seedAddresses) {
+    try {
+      const metadata = await quai.getERC20Metadata(address);
+      if (metadata) {
+        await supabase.upsertToken({
+          address,
+          standard: 'ERC20',
+          ...metadata,
+          discoveredVia: 'seed',
+        });
+        logger.info({ address, symbol: metadata.symbol }, 'Seeded token');
+      }
+    } catch (err) {
+      logger.warn({ err, address }, 'Failed to seed token, skipping');
+    }
+  }
+
+  // Load tracked tokens from database
+  const trackedTokens: Map<string, TokenStandard> = new Map();
+  const tokens = await supabase.getAllTokens();
+  tokens.forEach((t) => trackedTokens.set(t.address.toLowerCase(), t.standard));
+  logger.info({ count: trackedTokens.size }, 'Loaded tracked tokens');
+
   await supabase.setIsSyncing(true);
 
   const batchSize = config.indexer.batchSize;
@@ -44,6 +69,7 @@ async function backfill(): Promise<void> {
       try {
         await processBlockRange(start, end, {
           trackedWallets,
+          trackedTokens,
           onWalletDiscovered: (walletAddress) => {
             trackedWallets.add(walletAddress.toLowerCase());
             logger.info({ wallet: walletAddress }, 'Discovered new wallet');

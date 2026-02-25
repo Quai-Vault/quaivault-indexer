@@ -7,6 +7,7 @@ import type { DecodedEvent } from '../types/index.js';
 import { supabase } from '../services/supabase.js';
 import { quai } from '../services/quai.js';
 import { logger } from '../utils/logger.js';
+import { withRetry } from '../utils/retry.js';
 import { validateEventArgs } from './helpers.js';
 
 export async function handleRecoverySetup(event: DecodedEvent): Promise<void> {
@@ -44,14 +45,11 @@ export async function handleRecoveryInitiated(event: DecodedEvent): Promise<void
   const recoveryConfig = await supabase.getRecoveryConfig(wallet);
   const recoveryPeriod = recoveryConfig?.recoveryPeriod || 0;
 
-  let executionTime: number;
-  try {
-    const blockTimestamp = await quai.getBlockTimestamp(event.blockNumber);
-    executionTime = blockTimestamp + recoveryPeriod;
-  } catch (err) {
-    logger.warn({ err, blockNumber: event.blockNumber }, 'Failed to get block timestamp, using current time');
-    executionTime = Math.floor(Date.now() / 1000) + recoveryPeriod;
-  }
+  const blockTimestamp = await withRetry(
+    () => quai.getBlockTimestamp(event.blockNumber),
+    { operation: `getBlockTimestamp(${event.blockNumber})` }
+  );
+  const executionTime = blockTimestamp + recoveryPeriod;
 
   await supabase.upsertRecovery({
     walletAddress: wallet,

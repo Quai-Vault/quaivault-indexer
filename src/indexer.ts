@@ -9,14 +9,14 @@ import { logger } from './utils/logger.js';
 import { getModuleContractAddresses } from './utils/modules.js';
 import { withRetry, RetryTracker } from './utils/retry.js';
 import { CircuitBreaker } from './utils/circuit-breaker.js';
-
-// Number of blocks to roll back when a chain reorg is detected
-const REORG_ROLLBACK_BLOCKS = 10;
+import type { TokenStandard } from './types/index.js';
 
 export class Indexer {
   private isRunning = false;
   // Set of lowercase wallet addresses for tracking
   private trackedWallets: Set<string> = new Set();
+  // Map of lowercase token addresses to their standard (ERC20/ERC721)
+  private trackedTokens: Map<string, TokenStandard> = new Map();
   // Retry tracker for poll loop resilience
   private pollRetryTracker = new RetryTracker();
   // Circuit breaker for RPC failures
@@ -27,7 +27,7 @@ export class Indexer {
   );
   // In-flight work promise for graceful shutdown
   private currentWork: Promise<{ caughtUp: boolean }> | null = null;
-  // Last indexed block hash for reorg detection
+  // Last indexed block hash for reorg detection (persisted in indexer_state)
   private lastBlockHash: string | null = null;
 
   async start(): Promise<void> {
@@ -47,6 +47,13 @@ export class Indexer {
     // Update health service with wallet count
     health.setTrackedWalletsCount(this.trackedWallets.size);
 
+    // Seed known tokens from config (resolve metadata via RPC)
+    await this.seedTokens();
+
+    // Load tracked tokens from database
+    await this.refreshTrackedTokens();
+    logger.info({ count: this.trackedTokens.size }, 'Loaded tracked tokens');
+
     // Log module contracts being watched
     const moduleContracts = getModuleContractAddresses();
     logger.info(
@@ -62,9 +69,13 @@ export class Indexer {
       config.indexer.startBlock
     );
 
+    // Restore persisted block hash for reorg detection across restarts
+    this.lastBlockHash = state.lastBlockHash;
+
     logger.info(
       {
         lastIndexed: state.lastIndexedBlock,
+        lastBlockHash: state.lastBlockHash ? state.lastBlockHash.slice(0, 18) + '...' : null,
         currentBlock,
         startBlock,
       },
@@ -148,6 +159,7 @@ export class Indexer {
   ): Promise<void> {
     await processBlockRange(fromBlock, toBlock, {
       trackedWallets: this.trackedWallets,
+      trackedTokens: this.trackedTokens,
       onWalletDiscovered: (walletAddress, event) => {
         const walletLower = walletAddress.toLowerCase();
         const isNew = !this.trackedWallets.has(walletLower);
@@ -169,9 +181,11 @@ export class Indexer {
         if (event.name === 'WalletRegistered' && isNew) {
           const historyEnd = event.blockNumber - 1;
           if (historyEnd >= config.indexer.startBlock) {
-            // Fire-and-forget with error handling — backfill runs async
-            this.backfillWalletHistory(walletLower, config.indexer.startBlock, historyEnd)
-              .catch((err) => logger.error({ err, wallet: walletLower }, 'Wallet history backfill failed'));
+            // Async backfill with retry — runs in background, errors are logged
+            withRetry(
+              () => this.backfillWalletHistory(walletLower, config.indexer.startBlock, historyEnd),
+              { operation: `backfillWalletHistory(${walletLower})` }
+            ).catch((err) => logger.error({ err, wallet: walletLower }, 'Wallet history backfill failed after retries'));
           }
         }
       },
@@ -223,6 +237,9 @@ export class Indexer {
   }
 
   private async pollOnce(): Promise<{ caughtUp: boolean }> {
+    // Refresh tracked tokens every poll cycle (lightweight, few rows)
+    await this.refreshTrackedTokens();
+
     const state = await supabase.getIndexerState();
     const currentBlock = await quai.getBlockNumber();
     const safeBlock = currentBlock - config.indexer.confirmations;
@@ -234,11 +251,12 @@ export class Indexer {
     );
 
     // Chain reorg detection: verify the last indexed block hash still matches
+    // lastBlockHash is persisted in indexer_state so detection works across restarts
     if (this.lastBlockHash && state.lastIndexedBlock > 0) {
       const block = await quai.getBlock(state.lastIndexedBlock);
       if (block && block.hash !== this.lastBlockHash) {
         const rollbackTo = Math.max(
-          state.lastIndexedBlock - REORG_ROLLBACK_BLOCKS,
+          state.lastIndexedBlock - config.indexer.reorgRollbackBlocks,
           config.indexer.startBlock
         );
         logger.warn(
@@ -250,7 +268,7 @@ export class Indexer {
           },
           'Chain reorg detected — rolling back indexer state'
         );
-        await supabase.updateIndexerState(rollbackTo);
+        await supabase.updateIndexerState(rollbackTo, undefined);
         this.lastBlockHash = null;
         return { caughtUp: false };
       }
@@ -294,13 +312,12 @@ export class Indexer {
         'Indexing block range'
       );
       await this.indexBlockRange(startBlock, safeBlock);
-      await supabase.updateIndexerState(safeBlock);
 
-      // Store last block hash for reorg detection on next poll
+      // Persist block hash alongside state for reorg detection across restarts
       const lastBlock = await quai.getBlock(safeBlock);
-      if (lastBlock) {
-        this.lastBlockHash = lastBlock.hash;
-      }
+      const blockHash = lastBlock?.hash ?? null;
+      await supabase.updateIndexerState(safeBlock, blockHash ?? undefined);
+      this.lastBlockHash = blockHash;
     }
 
     return { caughtUp: false };
@@ -344,6 +361,45 @@ export class Indexer {
     }
 
     logger.info({ wallet: walletAddress }, 'Wallet history backfill complete');
+  }
+
+  /**
+   * Seed known tokens from SEED_TOKEN_ADDRESSES env var.
+   * Probes each address via RPC for ERC20 metadata and upserts to DB.
+   */
+  private async seedTokens(): Promise<void> {
+    const seedAddresses = config.tokens.seedAddresses;
+    if (seedAddresses.length === 0) return;
+
+    logger.info({ count: seedAddresses.length }, 'Seeding tokens from config');
+    for (const address of seedAddresses) {
+      try {
+        const metadata = await quai.getERC20Metadata(address);
+        if (metadata) {
+          await supabase.upsertToken({
+            address,
+            standard: 'ERC20',
+            ...metadata,
+            discoveredVia: 'seed',
+          });
+          logger.info({ address, symbol: metadata.symbol }, 'Seeded token');
+        } else {
+          logger.warn({ address }, 'Seed token RPC probe returned no metadata, skipping');
+        }
+      } catch (err) {
+        logger.warn({ err, address }, 'Failed to seed token, skipping');
+      }
+    }
+  }
+
+  /**
+   * Reload tracked tokens from the database (atomic swap).
+   */
+  private async refreshTrackedTokens(): Promise<void> {
+    const tokens = await supabase.getAllTokens();
+    this.trackedTokens = new Map(
+      tokens.map((t) => [t.address.toLowerCase(), t.standard])
+    );
   }
 
   private sleep(ms: number): Promise<void> {
