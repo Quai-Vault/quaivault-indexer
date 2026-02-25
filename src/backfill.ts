@@ -70,6 +70,11 @@ async function backfill(): Promise<void> {
         await processBlockRange(start, end, {
           trackedWallets,
           trackedTokens,
+          refreshTrackedTokens: async () => {
+            const latest = await supabase.getAllTokens();
+            trackedTokens.clear();
+            latest.forEach((t) => trackedTokens.set(t.address.toLowerCase(), t.standard));
+          },
           onWalletDiscovered: (walletAddress) => {
             trackedWallets.add(walletAddress.toLowerCase());
             logger.info({ wallet: walletAddress }, 'Discovered new wallet');

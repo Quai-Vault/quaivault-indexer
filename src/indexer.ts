@@ -160,6 +160,7 @@ export class Indexer {
     await processBlockRange(fromBlock, toBlock, {
       trackedWallets: this.trackedWallets,
       trackedTokens: this.trackedTokens,
+      refreshTrackedTokens: () => this.refreshTrackedTokens(),
       onWalletDiscovered: (walletAddress, event) => {
         const walletLower = walletAddress.toLowerCase();
         const isNew = !this.trackedWallets.has(walletLower);
@@ -393,13 +394,14 @@ export class Indexer {
   }
 
   /**
-   * Reload tracked tokens from the database (atomic swap).
+   * Reload tracked tokens from the database, mutating the existing Map in-place.
+   * Must mutate (not replace) so that processBlockRange's ctx.trackedTokens reference
+   * stays valid when this is called via the refreshTrackedTokens callback mid-batch.
    */
   private async refreshTrackedTokens(): Promise<void> {
     const tokens = await supabase.getAllTokens();
-    this.trackedTokens = new Map(
-      tokens.map((t) => [t.address.toLowerCase(), t.standard])
-    );
+    this.trackedTokens.clear();
+    tokens.forEach((t) => this.trackedTokens.set(t.address.toLowerCase(), t.standard));
   }
 
   private sleep(ms: number): Promise<void> {

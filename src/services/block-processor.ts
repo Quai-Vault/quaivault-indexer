@@ -24,6 +24,13 @@ export interface BlockProcessorContext {
   trackedTokens: Map<string, TokenStandard>;
   /** Called when a new wallet is discovered via factory events */
   onWalletDiscovered: (address: string, event: DecodedEvent) => void;
+  /**
+   * Called between wallet event processing (step 2) and token transfer fetching (step 3).
+   * Must mutate ctx.trackedTokens in-place to include any tokens auto-discovered during
+   * step 2 (e.g. via TransactionProposed calldata decoding), so those tokens' Transfer
+   * events are captured in the same batch.
+   */
+  refreshTrackedTokens?: () => Promise<void>;
 }
 
 /**
@@ -124,6 +131,14 @@ export async function processBlockRange(
       );
       allLogs.push({ log, priority: 2 });
     }
+  }
+
+  // Refresh tracked tokens before querying Transfer events.
+  // Tokens can be auto-discovered during step 2 (e.g. via TransactionProposed calldata).
+  // Without this refresh, Transfer events for newly-discovered tokens would be missed
+  // in the same batch — causing inflows/outflows to go unrecorded.
+  if (ctx.refreshTrackedTokens) {
+    await ctx.refreshTrackedTokens();
   }
 
   // 3. Get Transfer events from tracked token contracts (chunked)
