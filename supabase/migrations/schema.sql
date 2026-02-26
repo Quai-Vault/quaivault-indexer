@@ -581,6 +581,21 @@ BEGIN
         $func$ LANGUAGE plpgsql
     ', schema_name, schema_name);
 
+    -- Distinct token addresses for a wallet (for frontend token discovery at scale)
+    EXECUTE format('
+        CREATE OR REPLACE FUNCTION %I.get_wallet_token_addresses(p_wallet_address text)
+        RETURNS TABLE(token_address text)
+        LANGUAGE sql
+        STABLE
+        SECURITY INVOKER
+        SET search_path = %I
+        AS $func$
+            SELECT DISTINCT token_address
+            FROM token_transfers
+            WHERE wallet_address = lower(p_wallet_address);
+        $func$
+    ', schema_name, schema_name);
+
     -- Create triggers
     EXECUTE format('DROP TRIGGER IF EXISTS trigger_update_confirmation_count ON %I.confirmations', schema_name);
     EXECUTE format('CREATE TRIGGER trigger_update_confirmation_count AFTER INSERT OR UPDATE ON %I.confirmations FOR EACH ROW EXECUTE FUNCTION %I.update_confirmation_count()', schema_name, schema_name);
@@ -705,6 +720,7 @@ BEGIN
     -- Authenticated and anon roles: read-only access for frontend
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO authenticated, anon', schema_name);
     EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO authenticated, anon', schema_name);
+    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO authenticated, anon', schema_name);
 
     -- ============================================
     -- REALTIME PUBLICATION
