@@ -160,7 +160,6 @@ export class Indexer {
     await processBlockRange(fromBlock, toBlock, {
       trackedWallets: this.trackedWallets,
       trackedTokens: this.trackedTokens,
-      refreshTrackedTokens: () => this.refreshTrackedTokens(),
       onWalletDiscovered: (walletAddress, event) => {
         const walletLower = walletAddress.toLowerCase();
         const isNew = !this.trackedWallets.has(walletLower);

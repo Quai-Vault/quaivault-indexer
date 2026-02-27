@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { quai } from './quai.js';
+import { supabase } from './supabase.js';
 import {
   decodeEvent,
   getAllEventTopics,
@@ -20,17 +21,81 @@ import { IndexerLog, DecodedEvent, TokenStandard } from '../types/index.js';
 export interface BlockProcessorContext {
   /** Set of lowercase wallet addresses currently being tracked */
   trackedWallets: Set<string>;
-  /** Map of lowercase token addresses to their standard (ERC20/ERC721) */
+  /** Map of lowercase token addresses to their standard (ERC20/ERC721) — serves as a cache */
   trackedTokens: Map<string, TokenStandard>;
   /** Called when a new wallet is discovered via factory events */
   onWalletDiscovered: (address: string, event: DecodedEvent) => void;
-  /**
-   * Called between wallet event processing (step 2) and token transfer fetching (step 3).
-   * Must mutate ctx.trackedTokens in-place to include any tokens auto-discovered during
-   * step 2 (e.g. via TransactionProposed calldata decoding), so those tokens' Transfer
-   * events are captured in the same batch.
-   */
-  refreshTrackedTokens?: () => Promise<void>;
+}
+
+/**
+ * Pad a lowercase address to a 32-byte hex topic value.
+ * ERC20/ERC721 Transfer events encode indexed addresses as zero-padded 32-byte values.
+ */
+function addressToTopic(address: string): string {
+  return '0x' + address.slice(2).padStart(64, '0');
+}
+
+/**
+ * Auto-discover a token contract by probing for ERC20 / ERC721 metadata.
+ * Uses topic count to determine the likely standard (4 topics = ERC721, 3 = ERC20).
+ * Returns the standard if successfully discovered and upserted, or null if not a token.
+ */
+async function autoDiscoverToken(
+  tokenAddress: string,
+  log: IndexerLog,
+  ctx: BlockProcessorContext,
+): Promise<TokenStandard | null> {
+  const isLikelyERC721 = log.topics.length === 4;
+
+  if (isLikelyERC721) {
+    const metadata = await quai.getERC721Metadata(tokenAddress);
+    if (metadata) {
+      await supabase.upsertToken({
+        address: tokenAddress,
+        standard: 'ERC721',
+        ...metadata,
+        decimals: 0,
+        discoveredAtBlock: log.blockNumber,
+        discoveredVia: 'transfer',
+      });
+      ctx.trackedTokens.set(tokenAddress, 'ERC721');
+      logger.info({ token: tokenAddress, symbol: metadata.symbol }, 'Auto-discovered ERC721 token via Transfer event');
+      return 'ERC721';
+    }
+  } else {
+    // 3 topics — try ERC20 first, fall back to ERC721
+    const erc20Meta = await quai.getERC20Metadata(tokenAddress);
+    if (erc20Meta) {
+      await supabase.upsertToken({
+        address: tokenAddress,
+        standard: 'ERC20',
+        ...erc20Meta,
+        discoveredAtBlock: log.blockNumber,
+        discoveredVia: 'transfer',
+      });
+      ctx.trackedTokens.set(tokenAddress, 'ERC20');
+      logger.info({ token: tokenAddress, symbol: erc20Meta.symbol }, 'Auto-discovered ERC20 token via Transfer event');
+      return 'ERC20';
+    }
+
+    // ERC20 probe failed — some NFTs use 3-topic Transfer events too
+    const erc721Meta = await quai.getERC721Metadata(tokenAddress);
+    if (erc721Meta) {
+      await supabase.upsertToken({
+        address: tokenAddress,
+        standard: 'ERC721',
+        ...erc721Meta,
+        decimals: 0,
+        discoveredAtBlock: log.blockNumber,
+        discoveredVia: 'transfer',
+      });
+      ctx.trackedTokens.set(tokenAddress, 'ERC721');
+      logger.info({ token: tokenAddress, symbol: erc721Meta.symbol }, 'Auto-discovered ERC721 token via Transfer event (ERC20 fallback)');
+      return 'ERC721';
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -133,36 +198,63 @@ export async function processBlockRange(
     }
   }
 
-  // Refresh tracked tokens before querying Transfer events.
-  // Tokens can be auto-discovered during step 2 (e.g. via TransactionProposed calldata).
-  // Without this refresh, Transfer events for newly-discovered tokens would be missed
-  // in the same batch — causing inflows/outflows to go unrecorded.
-  if (ctx.refreshTrackedTokens) {
-    await ctx.refreshTrackedTokens();
-  }
-
-  // 3. Get Transfer events from tracked token contracts (chunked)
-  if (ctx.trackedTokens.size > 0 && ctx.trackedWallets.size > 0) {
-    const tokenAddresses = Array.from(ctx.trackedTokens.keys());
-    const chunkSize = config.indexer.getLogsChunkSize;
+  // 3. Wildcard Transfer scan: find ALL ERC20/ERC721 Transfer events where
+  //    a tracked wallet is the sender (outflow) or receiver (inflow).
+  //    Queries by wallet address in topics rather than by token contract address,
+  //    so transfers involving unknown/undiscovered tokens are captured too.
+  if (ctx.trackedWallets.size > 0) {
     const transferTopic = getTokenTransferTopic();
+    const walletAddresses = Array.from(ctx.trackedWallets);
+    const chunkSize = config.indexer.getLogsChunkSize;
+    // Track addresses that failed token probing within this batch to avoid re-probing
+    const notTokens = new Set<string>();
+    const seen = new Set<string>();
 
-    for (let i = 0; i < tokenAddresses.length; i += chunkSize) {
-      const chunk = tokenAddresses.slice(i, i + chunkSize);
-      const tokenLogs = await quai.getLogs(
-        chunk,
-        [[transferTopic]],
+    for (let i = 0; i < walletAddresses.length; i += chunkSize) {
+      const chunk = walletAddresses.slice(i, i + chunkSize);
+      const paddedChunk = chunk.map(addressToTopic);
+
+      // Inflows: Transfer(*, *, walletAddress) — any contract to a tracked vault
+      const inflowLogs = await quai.getLogs(
+        null,
+        [transferTopic, null, paddedChunk],
         fromBlock,
         toBlock
       );
 
-      // Client-side filter: only keep logs where from or to is a tracked vault
-      for (const log of tokenLogs) {
-        if (log.topics.length < 3) continue;
-        const from = ('0x' + log.topics[1].slice(26)).toLowerCase();
-        const to = ('0x' + log.topics[2].slice(26)).toLowerCase();
+      // Outflows: Transfer(*, walletAddress, *) — a tracked vault to any address
+      const outflowLogs = await quai.getLogs(
+        null,
+        [transferTopic, paddedChunk, null],
+        fromBlock,
+        toBlock
+      );
 
-        if (ctx.trackedWallets.has(from) || ctx.trackedWallets.has(to)) {
+      for (const log of [...inflowLogs, ...outflowLogs]) {
+        if (log.topics.length < 3) continue;
+        // Deduplicate (a transfer between two tracked wallets appears in both queries)
+        const key = `${log.transactionHash}-${log.index}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const tokenAddr = log.address.toLowerCase();
+
+        // Ensure token is tracked — auto-discover if unknown
+        if (!ctx.trackedTokens.has(tokenAddr) && !notTokens.has(tokenAddr)) {
+          try {
+            const standard = await autoDiscoverToken(tokenAddr, log, ctx);
+            if (!standard) {
+              notTokens.add(tokenAddr);
+              continue;
+            }
+          } catch (err) {
+            logger.warn({ err, token: tokenAddr }, 'Token auto-discovery failed during Transfer scan');
+            notTokens.add(tokenAddr);
+            continue;
+          }
+        }
+
+        if (ctx.trackedTokens.has(tokenAddr)) {
           allLogs.push({ log, priority: 3 });
         }
       }

@@ -118,17 +118,20 @@ class QuaiService {
   }
 
   async getLogs(
-    address: string | string[],
+    address: string | string[] | null,
     topics: (string | string[] | null)[],
     fromBlock: number,
     toBlock: number
   ): Promise<IndexerLog[]> {
     await this.rateLimiter.acquire();
 
-    // Normalize addresses to lowercase for downstream DB consistency
-    const normalizedAddress = Array.isArray(address)
-      ? address.map(a => a.toLowerCase())
-      : address.toLowerCase();
+    // Normalize addresses to lowercase for downstream DB consistency.
+    // null = no address filter (match all contracts) — used for wildcard Transfer scans.
+    const normalizedAddress = address === null
+      ? undefined
+      : Array.isArray(address)
+        ? address.map(a => a.toLowerCase())
+        : address.toLowerCase();
 
     return this.withTrackedRetry(async () => {
       const logs = await withTimeout(
