@@ -19,6 +19,7 @@ export async function handleExecutionFromModuleSuccess(event: DecodedEvent): Pro
     success: true,
     executedAtBlock: event.blockNumber,
     executedAtTx: event.transactionHash,
+    logIndex: event.logIndex,
   });
 
   logger.info(
@@ -38,6 +39,7 @@ export async function handleExecutionFromModuleFailure(event: DecodedEvent): Pro
     success: false,
     executedAtBlock: event.blockNumber,
     executedAtTx: event.transactionHash,
+    logIndex: event.logIndex,
   });
 
   logger.info(

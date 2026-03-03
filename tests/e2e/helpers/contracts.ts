@@ -12,11 +12,10 @@ interface TransactionLog {
 // Import ABIs - these will be resolved at runtime
 import QuaiVaultFactoryABI from '../../../abis/QuaiVaultFactory.json' with { type: 'json' };
 import QuaiVaultABI from '../../../abis/QuaiVault.json' with { type: 'json' };
-import QuaiVaultProxyABI from '../../../abis/QuaiVaultProxy.json' with { type: 'json' };
-import DailyLimitModuleABI from '../../../abis/DailyLimitModule.json' with { type: 'json' };
-import WhitelistModuleABI from '../../../abis/WhitelistModule.json' with { type: 'json' };
 import SocialRecoveryModuleABI from '../../../abis/SocialRecoveryModule.json' with { type: 'json' };
-import MockModuleABI from '../../../abis/MockModule.json' with { type: 'json' };
+import QuaiVaultProxyABI from '../../../abis/QuaiVaultProxy.json' with { type: 'json' };
+import MockERC721ABI from '../../../abis/MockERC721.json' with { type: 'json' };
+import MockERC1155ABI from '../../../abis/MockERC1155.json' with { type: 'json' };
 
 // Maximum attempts to mine a valid salt for CREATE2
 const MAX_SALT_MINING_ATTEMPTS = 100000;
@@ -88,11 +87,7 @@ export class ContractHelper {
   private quaiVaultFactory: quais.Contract;
   private quaiVaultFactoryAddress: string;
   private quaiVaultImplementation: string;
-  private dailyLimitModule?: quais.Contract;
-  private whitelistModule?: quais.Contract;
   private socialRecoveryModule?: quais.Contract;
-  private mockModule?: quais.Contract;
-  private mockModuleAddress?: string;
 
   constructor(rpcUrl: string, ownerPrivateKeys: string[], config: E2EConfig) {
     // Use JsonRpcProvider with usePathing: true
@@ -115,45 +110,21 @@ export class ContractHelper {
     this.quaiVaultImplementation = config.quaiVaultImplementation;
 
     // Initialize contract instances with first owner wallet as default signer
-    // Note: ABI files have structure { "abi": [...] }, so we extract the .abi property
+    // Note: ABI files are flat arrays, except MockModule which has { "abi": [...] } wrapper
     this.quaiVaultFactory = new quais.Contract(
       config.quaiVaultFactoryAddress,
-      QuaiVaultFactoryABI.abi,
+      QuaiVaultFactoryABI,
       this.ownerWallets[0]
     );
-
-    if (config.dailyLimitModuleAddress) {
-      this.dailyLimitModule = new quais.Contract(
-        config.dailyLimitModuleAddress,
-        DailyLimitModuleABI.abi,
-        this.ownerWallets[0]
-      );
-    }
-
-    if (config.whitelistModuleAddress) {
-      this.whitelistModule = new quais.Contract(
-        config.whitelistModuleAddress,
-        WhitelistModuleABI.abi,
-        this.ownerWallets[0]
-      );
-    }
 
     if (config.socialRecoveryModuleAddress) {
       this.socialRecoveryModule = new quais.Contract(
         config.socialRecoveryModuleAddress,
-        SocialRecoveryModuleABI.abi,
+        SocialRecoveryModuleABI,
         this.ownerWallets[0]
       );
     }
 
-    if (config.mockModuleAddress) {
-      this.mockModuleAddress = config.mockModuleAddress;
-      this.mockModule = new quais.Contract(
-        config.mockModuleAddress,
-        MockModuleABI.abi,
-        this.ownerWallets[0]
-      );
-    }
   }
 
   /**
@@ -226,14 +197,14 @@ export class ContractHelper {
    * Get a QuaiVault contract instance for a specific wallet address
    */
   private getQuaiVault(walletAddress: string, signerIndex = 0): quais.Contract {
-    return new quais.Contract(walletAddress, QuaiVaultABI.abi, this.ownerWallets[signerIndex]);
+    return new quais.Contract(walletAddress, QuaiVaultABI, this.ownerWallets[signerIndex]);
   }
 
   /**
    * Get a QuaiVault contract instance using guardian signer
    */
   private getQuaiVaultAsGuardian(walletAddress: string, guardianIndex: number): quais.Contract {
-    return new quais.Contract(walletAddress, QuaiVaultABI.abi, this.guardianWallets[guardianIndex]);
+    return new quais.Contract(walletAddress, QuaiVaultABI, this.guardianWallets[guardianIndex]);
   }
 
   // ============================================
@@ -250,13 +221,14 @@ export class ContractHelper {
    */
   private async mineSalt(
     owners: string[],
-    threshold: number
+    threshold: number,
+    minExecutionDelay: number = 0
   ): Promise<{ salt: string; expectedAddress: string }> {
     const senderAddress = this.ownerWallets[0].address;
 
-    // Encode the initialization data for QuaiVault.initialize(owners, threshold)
-    const vaultIface = new quais.Interface(QuaiVaultABI.abi);
-    const initData = vaultIface.encodeFunctionData('initialize', [owners, threshold]);
+    // Encode the initialization data for QuaiVault.initialize(owners, threshold, minExecutionDelay)
+    const vaultIface = new quais.Interface(QuaiVaultABI);
+    const initData = vaultIface.encodeFunctionData('initialize', [owners, threshold, minExecutionDelay]);
 
     // Encode constructor arguments for QuaiVaultProxy(implementation, initData)
     const encodedArgs = quais.AbiCoder.defaultAbiCoder().encode(
@@ -264,7 +236,7 @@ export class ContractHelper {
       [this.quaiVaultImplementation, initData]
     );
 
-    // Full bytecode = proxy bytecode + encoded constructor args
+    // ERC1967 constructor proxy creation code
     const fullBytecode = QuaiVaultProxyABI.bytecode + encodedArgs.slice(2);
     const bytecodeHash = quais.keccak256(fullBytecode);
 
@@ -442,7 +414,7 @@ export class ContractHelper {
         const receipt = await tx.wait();
 
         // Extract txHash from TransactionProposed event
-        const proposedTopic = quais.id('TransactionProposed(bytes32,address,address,uint256,bytes)');
+        const proposedTopic = quais.id('TransactionProposed(bytes32,address,address,uint256,bytes,uint48,uint32)');
         const proposedLog = receipt.logs.find((log: TransactionLog) => log.topics[0] === proposedTopic);
 
         if (!proposedLog) {
@@ -652,140 +624,6 @@ export class ContractHelper {
   }
 
   // ============================================
-  // DAILY LIMIT MODULE
-  // ============================================
-
-  /**
-   * Set daily spending limit for a wallet
-   */
-  async setDailyLimit(walletAddress: string, limit: bigint): Promise<void> {
-    if (!this.dailyLimitModule) {
-      throw new Error('DailyLimitModule not configured');
-    }
-
-    const data = this.dailyLimitModule.interface.encodeFunctionData('setDailyLimit', [
-      walletAddress,
-      limit,
-    ]);
-
-    // Propose, approve with both owners, then execute
-    const txHash = await this.proposeTransaction(
-      walletAddress,
-      await this.dailyLimitModule.getAddress(),
-      0n,
-      data,
-      0
-    );
-    await this.approveTransaction(walletAddress, txHash, 0); // Proposer approves
-    await this.approveTransaction(walletAddress, txHash, 1); // Second owner approves
-    await this.executeTransaction(walletAddress, txHash);
-  }
-
-  /**
-   * Execute a transfer through the daily limit module
-   */
-  async executeDailyLimitTransfer(
-    walletAddress: string,
-    to: string,
-    amount: bigint
-  ): Promise<void> {
-    if (!this.dailyLimitModule) {
-      throw new Error('DailyLimitModule not configured');
-    }
-
-    await withRetry(
-      async () => {
-        // Warm up provider before transaction
-        await this.provider.getBlockNumber(Shard.Cyprus1);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const moduleWithSigner = this.dailyLimitModule!.connect(this.ownerWallets[0]) as any;
-        // ABI function: executeBelowLimit(address wallet, address to, uint256 value)
-        const tx = await moduleWithSigner.executeBelowLimit(walletAddress, to, amount);
-        await tx.wait();
-      },
-      'executeDailyLimitTransfer'
-    );
-  }
-
-  // ============================================
-  // WHITELIST MODULE
-  // ============================================
-
-  /**
-   * Add an address to the whitelist
-   */
-  async addToWhitelist(walletAddress: string, address: string, limit: bigint): Promise<void> {
-    if (!this.whitelistModule) {
-      throw new Error('WhitelistModule not configured');
-    }
-
-    const data = this.whitelistModule.interface.encodeFunctionData('addToWhitelist', [
-      walletAddress,
-      address,
-      limit,
-    ]);
-
-    // Propose, approve with both owners, then execute
-    const txHash = await this.proposeTransaction(
-      walletAddress,
-      await this.whitelistModule.getAddress(),
-      0n,
-      data,
-      0
-    );
-    await this.approveTransaction(walletAddress, txHash, 0); // Proposer approves
-    await this.approveTransaction(walletAddress, txHash, 1); // Second owner approves
-    await this.executeTransaction(walletAddress, txHash);
-  }
-
-  /**
-   * Remove an address from the whitelist
-   */
-  async removeFromWhitelist(walletAddress: string, address: string): Promise<void> {
-    if (!this.whitelistModule) {
-      throw new Error('WhitelistModule not configured');
-    }
-
-    const data = this.whitelistModule.interface.encodeFunctionData('removeFromWhitelist', [
-      walletAddress,
-      address,
-    ]);
-
-    // Propose, approve with both owners, then execute
-    const txHash = await this.proposeTransaction(
-      walletAddress,
-      await this.whitelistModule.getAddress(),
-      0n,
-      data,
-      0
-    );
-    await this.approveTransaction(walletAddress, txHash, 0); // Proposer approves
-    await this.approveTransaction(walletAddress, txHash, 1); // Second owner approves
-    await this.executeTransaction(walletAddress, txHash);
-  }
-
-  /**
-   * Execute a whitelisted transfer
-   */
-  async executeWhitelistTransfer(
-    walletAddress: string,
-    to: string,
-    amount: bigint
-  ): Promise<void> {
-    if (!this.whitelistModule) {
-      throw new Error('WhitelistModule not configured');
-    }
-
-    // Warm up provider before transaction
-    await this.provider.getBlockNumber(Shard.Cyprus1);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const moduleWithSigner = this.whitelistModule.connect(this.ownerWallets[0]) as any;
-    // ABI function: executeToWhitelist(address wallet, address to, uint256 value, bytes data)
-    const tx = await moduleWithSigner.executeToWhitelist(walletAddress, to, amount, '0x');
-    await tx.wait();
-  }
-
-  // ============================================
   // SOCIAL RECOVERY MODULE
   // ============================================
 
@@ -938,153 +776,140 @@ export class ContractHelper {
   }
 
   // ============================================
-  // MOCK MODULE (for Zodiac IAvatar testing)
+  // ERC721 TOKEN OPERATIONS
   // ============================================
 
   /**
-   * Get MockModule address
+   * Mint an ERC721 token to an address
    */
-  getMockModuleAddress(): string | undefined {
-    return this.mockModuleAddress;
-  }
-
-  /**
-   * Set the target wallet for MockModule
-   */
-  async setMockModuleTarget(walletAddress: string): Promise<void> {
-    if (!this.mockModule) {
-      throw new Error('MockModule not configured');
-    }
-
-    // Warm up provider before transaction
-    await this.provider.getBlockNumber(Shard.Cyprus1);
-    const tx = await this.mockModule.setTarget(walletAddress);
-    await tx.wait();
-  }
-
-  /**
-   * Execute a transaction via MockModule (triggers ExecutionFromModuleSuccess/Failure)
-   * Uses 4-param version: exec(to, value, data, operation)
-   * @param to Destination address
-   * @param value Amount to send
-   * @param data Transaction calldata
-   * @param operation 0=Call, 1=DelegateCall
-   * @returns success Whether the execution succeeded
-   */
-  async execViaMockModule(
+  async mintERC721(
+    mockAddress: string,
     to: string,
-    value: bigint,
-    data: string,
-    operation: number = 0
-  ): Promise<boolean> {
-    if (!this.mockModule) {
-      throw new Error('MockModule not configured');
-    }
-
-    // Warm up provider before transaction
-    await this.provider.getBlockNumber(Shard.Cyprus1);
-    const tx = await this.mockModule.exec(to, value, data, operation);
-    const receipt = await tx.wait();
-
-    // Parse return value from logs/events
-    // The exec function returns bool success, but we can also check for revert
-    return receipt.status === 1;
+    tokenId: bigint,
+    signerIndex = 0
+  ): Promise<void> {
+    await withRetry(
+      async () => {
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        const mock = new quais.Contract(mockAddress, MockERC721ABI, this.ownerWallets[signerIndex]);
+        const tx = await mock.mint(to, tokenId);
+        await tx.wait();
+      },
+      'mintERC721'
+    );
   }
 
   /**
-   * Execute a transaction via MockModule using legacy 3-param version
-   * @param to Destination address
-   * @param value Amount to send
-   * @param data Transaction calldata
-   * @returns success Whether the execution succeeded
+   * Transfer an ERC721 token between addresses.
+   * Calls transferFrom on the mock contract.
    */
-  async execLegacyViaMockModule(
+  async transferERC721(
+    mockAddress: string,
+    from: string,
     to: string,
-    value: bigint,
-    data: string
-  ): Promise<boolean> {
-    if (!this.mockModule) {
-      throw new Error('MockModule not configured');
-    }
+    tokenId: bigint,
+    signerIndex = 0
+  ): Promise<void> {
+    await withRetry(
+      async () => {
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        const mock = new quais.Contract(mockAddress, MockERC721ABI, this.ownerWallets[signerIndex]);
+        const tx = await mock.transferFrom(from, to, tokenId);
+        await tx.wait();
+      },
+      'transferERC721'
+    );
+  }
 
-    // Warm up provider before transaction
-    await this.provider.getBlockNumber(Shard.Cyprus1);
-    const tx = await this.mockModule.execLegacy(to, value, data);
-    const receipt = await tx.wait();
-    return receipt.status === 1;
+  // ============================================
+  // ERC1155 TOKEN OPERATIONS
+  // ============================================
+
+  /**
+   * Mint ERC1155 tokens to an address
+   */
+  async mintERC1155(
+    mockAddress: string,
+    to: string,
+    id: bigint,
+    amount: bigint,
+    signerIndex = 0
+  ): Promise<void> {
+    await withRetry(
+      async () => {
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        const mock = new quais.Contract(mockAddress, MockERC1155ABI, this.ownerWallets[signerIndex]);
+        const tx = await mock.mint(to, id, amount, '0x');
+        await tx.wait();
+      },
+      'mintERC1155'
+    );
   }
 
   /**
-   * Try to enable a module via MockModule (should fail due to security check)
-   * This is useful for testing ExecutionFromModuleFailure
+   * Batch mint ERC1155 tokens to an address
    */
-  async tryEnableModuleViaMockModule(moduleToEnable: string): Promise<boolean> {
-    if (!this.mockModule) {
-      throw new Error('MockModule not configured');
-    }
-
-    // Warm up provider before transaction
-    await this.provider.getBlockNumber(Shard.Cyprus1);
-    const tx = await this.mockModule.tryEnableModule(moduleToEnable);
-    const receipt = await tx.wait();
-    return receipt.status === 1;
+  async mintBatchERC1155(
+    mockAddress: string,
+    to: string,
+    ids: bigint[],
+    amounts: bigint[],
+    signerIndex = 0
+  ): Promise<void> {
+    await withRetry(
+      async () => {
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        const mock = new quais.Contract(mockAddress, MockERC1155ABI, this.ownerWallets[signerIndex]);
+        const tx = await mock.mintBatch(to, ids, amounts, '0x');
+        await tx.wait();
+      },
+      'mintBatchERC1155'
+    );
   }
 
   /**
-   * Try to disable a module via MockModule (should fail due to security check)
-   * This is useful for testing ExecutionFromModuleFailure
+   * Transfer ERC1155 token via safeTransferFrom.
+   * Requires the signer to be approved or the token owner.
    */
-  async tryDisableModuleViaMockModule(
-    prevModule: string,
-    moduleToDisable: string
-  ): Promise<boolean> {
-    if (!this.mockModule) {
-      throw new Error('MockModule not configured');
-    }
-
-    // Warm up provider before transaction
-    await this.provider.getBlockNumber(Shard.Cyprus1);
-    const tx = await this.mockModule.tryDisableModule(prevModule, moduleToDisable);
-    const receipt = await tx.wait();
-    return receipt.status === 1;
+  async transferERC1155(
+    mockAddress: string,
+    from: string,
+    to: string,
+    id: bigint,
+    amount: bigint,
+    signerIndex = 0
+  ): Promise<void> {
+    await withRetry(
+      async () => {
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        const mock = new quais.Contract(mockAddress, MockERC1155ABI, this.ownerWallets[signerIndex]);
+        const tx = await mock.safeTransferFrom(from, to, id, amount, '0x');
+        await tx.wait();
+      },
+      'transferERC1155'
+    );
   }
 
   /**
-   * Execute a call that will fail via MockModule, triggering ExecutionFromModuleFailure.
-   *
-   * IMPORTANT: This method is different from tryEnableModuleViaMockModule:
-   * - tryEnableModuleViaMockModule triggers a REVERT in the security check, so NO events are emitted
-   * - This method calls changeThreshold(0) which:
-   *   1. PASSES security checks (not enableModule/disableModule)
-   *   2. FAILS at the sub-call level (InvalidThreshold error)
-   *   3. Emits ExecutionFromModuleFailure
-   *
-   * @param walletAddress The wallet to call
-   * @returns true if the outer transaction succeeded (the inner call will have failed)
+   * Batch transfer ERC1155 tokens via safeBatchTransferFrom.
    */
-  async execRevertingCallViaMockModule(walletAddress: string): Promise<boolean> {
-    if (!this.mockModule) {
-      throw new Error('MockModule not configured');
-    }
-
-    // Encode changeThreshold(0) - this will revert with InvalidThreshold
-    // but crucially, it does NOT trigger the security check that blocks enableModule/disableModule
-    const quaiVaultIface = new quais.Interface(QuaiVaultABI.abi);
-    const data = quaiVaultIface.encodeFunctionData('changeThreshold', [0]);
-
-    // Warm up provider before transaction
-    await this.provider.getBlockNumber(Shard.Cyprus1);
-
-    // Call exec() to execute changeThreshold(0) on the wallet
-    // The outer call (MockModule.exec) will succeed
-    // The inner call (QuaiVault.execTransactionFromModule -> wallet.changeThreshold(0)) will fail
-    // This causes ExecutionFromModuleFailure to be emitted
-    const tx = await this.mockModule.exec(walletAddress, 0, data, 0);
-    const receipt = await tx.wait();
-
-    // Return true if the MockModule.exec() transaction succeeded
-    // (even though the inner call failed)
-    return receipt.status === 1;
+  async batchTransferERC1155(
+    mockAddress: string,
+    from: string,
+    to: string,
+    ids: bigint[],
+    amounts: bigint[],
+    signerIndex = 0
+  ): Promise<void> {
+    await withRetry(
+      async () => {
+        await this.provider.getBlockNumber(Shard.Cyprus1);
+        const mock = new quais.Contract(mockAddress, MockERC1155ABI, this.ownerWallets[signerIndex]);
+        const tx = await mock.safeBatchTransferFrom(from, to, ids, amounts, '0x');
+        await tx.wait();
+      },
+      'batchTransferERC1155'
+    );
   }
 
   // ============================================

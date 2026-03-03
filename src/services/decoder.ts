@@ -1,14 +1,7 @@
 import { quais } from 'quais';
-import type { DecodedEvent, TransactionType, DecodedParams, IndexerLog } from '../types/index.js';
+import type { DecodedEvent, TransactionType, DecodedParams, IndexerLog, TokenStandard } from '../types/index.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
-
-// Mapping from internal event names to actual contract event names
-// Used when internal name differs from the actual event name in the contract
-// (e.g., we use 'DailyLimitTransactionExecuted' internally but the contract emits 'TransactionExecuted')
-const ACTUAL_EVENT_NAMES: Record<string, string> = {
-  DailyLimitTransactionExecuted: 'TransactionExecuted',
-};
 
 // Event signatures (keccak256 hashes)
 export const EVENT_SIGNATURES = {
@@ -16,20 +9,26 @@ export const EVENT_SIGNATURES = {
   WalletCreated: quais.id('WalletCreated(address,address[],uint256,address,bytes32)'),
   WalletRegistered: quais.id('WalletRegistered(address,address)'),
 
-  // QuaiVault (formerly MultisigWallet)
+  // QuaiVault
   TransactionProposed: quais.id(
-    'TransactionProposed(bytes32,address,address,uint256,bytes)'
+    'TransactionProposed(bytes32,address,address,uint256,bytes,uint48,uint32)'
   ),
   TransactionApproved: quais.id('TransactionApproved(bytes32,address)'),
   ApprovalRevoked: quais.id('ApprovalRevoked(bytes32,address)'),
   TransactionExecuted: quais.id('TransactionExecuted(bytes32,address)'),
   TransactionCancelled: quais.id('TransactionCancelled(bytes32,address)'),
+  ThresholdReached: quais.id('ThresholdReached(bytes32,uint48,uint256)'),
+  TransactionFailed: quais.id('TransactionFailed(bytes32,address,bytes)'),
+  TransactionExpired: quais.id('TransactionExpired(bytes32)'),
   OwnerAdded: quais.id('OwnerAdded(address)'),
   OwnerRemoved: quais.id('OwnerRemoved(address)'),
   ThresholdChanged: quais.id('ThresholdChanged(uint256)'),
   ModuleEnabled: quais.id('ModuleEnabled(address)'),
   ModuleDisabled: quais.id('ModuleDisabled(address)'),
   Received: quais.id('Received(address,uint256)'),
+  MinExecutionDelayChanged: quais.id('MinExecutionDelayChanged(uint32,uint32)'),
+  MessageSigned: quais.id('MessageSigned(bytes32,bytes)'),
+  MessageUnsigned: quais.id('MessageUnsigned(bytes32,bytes)'),
 
   // Zodiac IAvatar Events
   ExecutionFromModuleSuccess: quais.id('ExecutionFromModuleSuccess(address)'),
@@ -47,25 +46,18 @@ export const EVENT_SIGNATURES = {
   RecoveryExecuted: quais.id('RecoveryExecuted(address,bytes32)'),
   RecoveryCancelled: quais.id('RecoveryCancelled(address,bytes32)'),
 
-  // Daily Limit Module
-  DailyLimitSet: quais.id('DailyLimitSet(address,uint256)'),
-  DailyLimitReset: quais.id('DailyLimitReset(address)'),
-  DailyLimitTransactionExecuted: quais.id(
-    'TransactionExecuted(address,address,uint256,uint256)'
-  ),
-
-  // Whitelist Module
-  AddressWhitelisted: quais.id('AddressWhitelisted(address,address,uint256)'),
-  AddressRemovedFromWhitelist: quais.id(
-    'AddressRemovedFromWhitelist(address,address)'
-  ),
-  WhitelistTransactionExecuted: quais.id(
-    'WhitelistTransactionExecuted(address,address,uint256)'
-  ),
-
   // ERC20/ERC721 Transfer (topic only — decoded from raw topics, not via EVENT_ABIS)
   Transfer: quais.id('Transfer(address,address,uint256)'),
+
+  // ERC1155 Transfer events (different topic0 from ERC20/ERC721 Transfer)
+  TransferSingle: quais.id('TransferSingle(address,address,address,uint256,uint256)'),
+  TransferBatch: quais.id('TransferBatch(address,address,address,uint256[],uint256[])'),
 };
+
+// Reverse lookup: topic0 hash → event name (O(1) instead of O(N) linear scan)
+const TOPIC_TO_EVENT = new Map<string, string>(
+  Object.entries(EVENT_SIGNATURES).map(([name, sig]) => [sig, name])
+);
 
 // ABI fragments for decoding
 const EVENT_ABIS: Record<string, string[]> = {
@@ -79,13 +71,15 @@ const EVENT_ABIS: Record<string, string[]> = {
   ],
   WalletRegistered: ['address indexed wallet', 'address indexed registrar'],
 
-  // QuaiVault (formerly MultisigWallet)
+  // QuaiVault
   TransactionProposed: [
     'bytes32 indexed txHash',
     'address indexed proposer',
     'address indexed to',
     'uint256 value',
     'bytes data',
+    'uint48 expiration',
+    'uint32 executionDelay',
   ],
   TransactionApproved: [
     'bytes32 indexed txHash',
@@ -94,12 +88,18 @@ const EVENT_ABIS: Record<string, string[]> = {
   ApprovalRevoked: ['bytes32 indexed txHash', 'address indexed owner'],
   TransactionExecuted: ['bytes32 indexed txHash', 'address indexed executor'],
   TransactionCancelled: ['bytes32 indexed txHash', 'address indexed canceller'],
+  ThresholdReached: ['bytes32 indexed txHash', 'uint48 approvedAt', 'uint256 executableAfter'],
+  TransactionFailed: ['bytes32 indexed txHash', 'address indexed executor', 'bytes returnData'],
+  TransactionExpired: ['bytes32 indexed txHash'],
   OwnerAdded: ['address indexed owner'],
   OwnerRemoved: ['address indexed owner'],
   ThresholdChanged: ['uint256 threshold'],
   ModuleEnabled: ['address indexed module'],
   ModuleDisabled: ['address indexed module'],
   Received: ['address indexed sender', 'uint256 amount'],
+  MinExecutionDelayChanged: ['uint32 oldDelay', 'uint32 newDelay'],
+  MessageSigned: ['bytes32 indexed msgHash', 'bytes data'],
+  MessageUnsigned: ['bytes32 indexed msgHash', 'bytes data'],
 
   // Zodiac IAvatar Events
   ExecutionFromModuleSuccess: ['address indexed module'],
@@ -137,41 +137,13 @@ const EVENT_ABIS: Record<string, string[]> = {
     'address indexed wallet',
     'bytes32 indexed recoveryHash',
   ],
-
-  // Daily Limit Module
-  DailyLimitSet: ['address indexed wallet', 'uint256 limit'],
-  DailyLimitReset: ['address indexed wallet'],
-  DailyLimitTransactionExecuted: [
-    'address indexed wallet',
-    'address indexed to',
-    'uint256 value',
-    'uint256 remainingLimit',
-  ],
-
-  // Whitelist Module
-  AddressWhitelisted: [
-    'address indexed wallet',
-    'address indexed addr',
-    'uint256 limit',
-  ],
-  AddressRemovedFromWhitelist: [
-    'address indexed wallet',
-    'address indexed addr',
-  ],
-  WhitelistTransactionExecuted: [
-    'address indexed wallet',
-    'address indexed to',
-    'uint256 value',
-  ],
 };
 
 export function decodeEvent(log: IndexerLog): DecodedEvent | null {
   const topic0 = log.topics[0];
 
-  // Find matching event
-  const eventName = Object.entries(EVENT_SIGNATURES).find(
-    ([, sig]) => sig === topic0
-  )?.[0];
+  // Find matching event via O(1) reverse lookup
+  const eventName = TOPIC_TO_EVENT.get(topic0);
 
   if (!eventName) {
     logger.debug(
@@ -191,10 +163,8 @@ export function decodeEvent(log: IndexerLog): DecodedEvent | null {
   }
 
   try {
-    // Use actual event name for Interface (some internal names differ from contract event names)
-    const actualEventName = ACTUAL_EVENT_NAMES[eventName] || eventName;
     const iface = new quais.Interface([
-      `event ${actualEventName}(${abiFragment.join(', ')})`,
+      `event ${eventName}(${abiFragment.join(', ')})`,
     ]);
 
     const decoded = iface.parseLog({
@@ -261,32 +231,16 @@ export function getSocialRecoveryEventTopics(): string[] {
   ];
 }
 
-export function getDailyLimitEventTopics(): string[] {
-  return [
-    EVENT_SIGNATURES.DailyLimitSet,
-    EVENT_SIGNATURES.DailyLimitReset,
-    EVENT_SIGNATURES.DailyLimitTransactionExecuted,
-  ];
-}
-
-export function getWhitelistEventTopics(): string[] {
-  return [
-    EVENT_SIGNATURES.AddressWhitelisted,
-    EVENT_SIGNATURES.AddressRemovedFromWhitelist,
-    EVENT_SIGNATURES.WhitelistTransactionExecuted,
-  ];
-}
-
 export function getModuleEventTopics(): string[] {
-  return [
-    ...getSocialRecoveryEventTopics(),
-    ...getDailyLimitEventTopics(),
-    ...getWhitelistEventTopics(),
-  ];
+  return getSocialRecoveryEventTopics();
 }
 
 export function getTokenTransferTopic(): string {
   return EVENT_SIGNATURES.Transfer;
+}
+
+export function getERC1155TransferTopics(): string[] {
+  return [EVENT_SIGNATURES.TransferSingle, EVENT_SIGNATURES.TransferBatch];
 }
 
 // ============================================
@@ -316,16 +270,36 @@ const FUNCTION_SELECTORS: Record<string, { name: string; abi: string; type: Tran
     abi: 'function enableModule(address module)',
     type: 'wallet_admin',
   },
-  // Legacy 1-param disableModule (for decoding older transactions)
-  [quais.id('disableModule(address)').slice(0, 10)]: {
-    name: 'disableModule',
-    abi: 'function disableModule(address module)',
-    type: 'wallet_admin',
-  },
-  // New Zodiac 2-param disableModule
+  // Zodiac 2-param disableModule (linked list)
   [quais.id('disableModule(address,address)').slice(0, 10)]: {
     name: 'disableModule',
     abi: 'function disableModule(address prevModule, address module)',
+    type: 'wallet_admin',
+  },
+
+  // Message signing self-calls
+  [quais.id('signMessage(bytes)').slice(0, 10)]: {
+    name: 'signMessage',
+    abi: 'function signMessage(bytes data)',
+    type: 'message_signing',
+  },
+  [quais.id('unsignMessage(bytes)').slice(0, 10)]: {
+    name: 'unsignMessage',
+    abi: 'function unsignMessage(bytes data)',
+    type: 'message_signing',
+  },
+
+  // Consensus cancellation self-call
+  [quais.id('cancelByConsensus(bytes32)').slice(0, 10)]: {
+    name: 'cancelByConsensus',
+    abi: 'function cancelByConsensus(bytes32 txHash)',
+    type: 'wallet_admin',
+  },
+
+  // Execution delay management self-call
+  [quais.id('setMinExecutionDelay(uint32)').slice(0, 10)]: {
+    name: 'setMinExecutionDelay',
+    abi: 'function setMinExecutionDelay(uint32 delay)',
     type: 'wallet_admin',
   },
 
@@ -354,35 +328,6 @@ const FUNCTION_SELECTORS: Record<string, { name: string; abi: string; type: Tran
     name: 'multiSend',
     abi: 'function multiSend(bytes transactions)',
     type: 'batched_call',
-  },
-
-  // Daily Limit Module Functions
-  [quais.id('setDailyLimit(address,uint256)').slice(0, 10)]: {
-    name: 'setDailyLimit',
-    abi: 'function setDailyLimit(address wallet, uint256 limit)',
-    type: 'module_config',
-  },
-  [quais.id('resetDailyLimit(address)').slice(0, 10)]: {
-    name: 'resetDailyLimit',
-    abi: 'function resetDailyLimit(address wallet)',
-    type: 'module_config',
-  },
-
-  // Whitelist Module Functions
-  [quais.id('addToWhitelist(address,address,uint256)').slice(0, 10)]: {
-    name: 'addToWhitelist',
-    abi: 'function addToWhitelist(address wallet, address addr, uint256 limit)',
-    type: 'module_config',
-  },
-  [quais.id('removeFromWhitelist(address,address)').slice(0, 10)]: {
-    name: 'removeFromWhitelist',
-    abi: 'function removeFromWhitelist(address wallet, address addr)',
-    type: 'module_config',
-  },
-  [quais.id('batchAddToWhitelist(address,address[],uint256[])').slice(0, 10)]: {
-    name: 'batchAddToWhitelist',
-    abi: 'function batchAddToWhitelist(address wallet, address[] addresses, uint256[] limits)',
-    type: 'module_config',
   },
 
   // Social Recovery Module Functions
@@ -420,7 +365,39 @@ const FUNCTION_SELECTORS: Record<string, { name: string; abi: string; type: Tran
     abi: 'function safeTransferFrom(address from, address to, uint256 tokenId, bytes data)',
     type: 'erc721_transfer',
   },
+
+  // ERC1155 Token Functions
+  [quais.id('safeTransferFrom(address,address,uint256,uint256,bytes)').slice(0, 10)]: {
+    name: 'safeTransferFrom',
+    abi: 'function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)',
+    type: 'erc1155_transfer',
+  },
+  [quais.id('safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)').slice(0, 10)]: {
+    name: 'safeBatchTransferFrom',
+    abi: 'function safeBatchTransferFrom(address from, address to, uint256[] ids, uint256[] amounts, bytes data)',
+    type: 'erc1155_transfer',
+  },
 };
+
+/** Set of function selectors that target token contracts (ERC20/721/1155) */
+const TOKEN_SELECTORS = new Set(
+  Object.entries(FUNCTION_SELECTORS)
+    .filter(([, info]) =>
+      info.type === 'erc20_transfer' ||
+      info.type === 'erc721_transfer' ||
+      info.type === 'erc1155_transfer'
+    )
+    .map(([selector]) => selector)
+);
+
+/**
+ * Check if calldata targets a token function (transfer, approve, etc.).
+ * Used to decide whether to probe an unknown contract for token metadata.
+ */
+export function isTokenSelector(data: string): boolean {
+  if (!data || data.length < 10) return false;
+  return TOKEN_SELECTORS.has(data.slice(0, 10).toLowerCase());
+}
 
 export interface DecodedCalldata {
   transactionType: TransactionType;
@@ -428,12 +405,15 @@ export interface DecodedCalldata {
 }
 
 /**
- * Decode transaction calldata and determine the transaction type
+ * Decode transaction calldata and determine the transaction type.
+ * When tokenStandard is provided, disambiguates shared selectors
+ * (e.g. transferFrom, approve) between ERC20 and ERC721.
  */
 export function decodeCalldata(
   toAddress: string,
   data: string,
-  value: string
+  value: string,
+  tokenStandard?: TokenStandard
 ): DecodedCalldata {
   // Check for empty data (pure transfer)
   if (!data || data === '0x' || data === '') {
@@ -451,8 +431,6 @@ export function decodeCalldata(
     // Check if this is a call to a known module address
     const toLower = toAddress.toLowerCase();
     const isModuleCall =
-      (config.contracts.dailyLimitModule?.toLowerCase() === toLower) ||
-      (config.contracts.whitelistModule?.toLowerCase() === toLower) ||
       (config.contracts.socialRecoveryModule?.toLowerCase() === toLower);
 
     // If it's a call to a module but unknown function, it's still module_config
@@ -487,6 +465,18 @@ export function decodeCalldata(
     };
   }
 
+  // Disambiguate ERC20/ERC721 shared selectors when token standard is known.
+  // transferFrom(address,address,uint256) and approve(address,uint256) have
+  // identical selectors for both standards.
+  let resolvedType = functionInfo.type;
+  if (
+    tokenStandard === 'ERC721' &&
+    resolvedType === 'erc20_transfer' &&
+    (functionInfo.name === 'transferFrom' || functionInfo.name === 'approve')
+  ) {
+    resolvedType = 'erc721_transfer';
+  }
+
   // Decode the function arguments
   try {
     const iface = new quais.Interface([functionInfo.abi]);
@@ -494,7 +484,7 @@ export function decodeCalldata(
 
     if (!decoded) {
       return {
-        transactionType: functionInfo.type,
+        transactionType: resolvedType,
         decodedParams: {
           function: functionInfo.name,
           args: { rawData: data },
@@ -516,7 +506,7 @@ export function decodeCalldata(
     });
 
     return {
-      transactionType: functionInfo.type,
+      transactionType: resolvedType,
       decodedParams: {
         function: functionInfo.name,
         args,
@@ -524,7 +514,7 @@ export function decodeCalldata(
     };
   } catch {
     return {
-      transactionType: functionInfo.type,
+      transactionType: resolvedType,
       decodedParams: {
         function: functionInfo.name,
         args: { rawData: data },
@@ -553,20 +543,17 @@ export function getTransactionDescription(decoded: DecodedCalldata): string {
     case 'enableModule':
       return `Enable module: ${args.module}`;
     case 'disableModule':
-      // Handle both 1-param (legacy) and 2-param (Zodiac) versions
       return args.prevModule
         ? `Disable module: ${args.module} (prev: ${args.prevModule})`
         : `Disable module: ${args.module}`;
-    case 'setDailyLimit':
-      return `Set daily limit to ${args.limit} for wallet ${args.wallet}`;
-    case 'resetDailyLimit':
-      return `Reset daily limit for wallet ${args.wallet}`;
-    case 'addToWhitelist':
-      return `Add ${args.addr} to whitelist with limit ${args.limit}`;
-    case 'removeFromWhitelist':
-      return `Remove ${args.addr} from whitelist`;
-    case 'batchAddToWhitelist':
-      return `Batch add ${(args.addresses as string[]).length} addresses to whitelist`;
+    case 'signMessage':
+      return `Sign message (EIP-1271)`;
+    case 'unsignMessage':
+      return `Unsign message (EIP-1271)`;
+    case 'cancelByConsensus':
+      return `Cancel transaction by consensus: ${args.txHash}`;
+    case 'setMinExecutionDelay':
+      return `Set minimum execution delay to ${args.delay}`;
     case 'setupRecovery':
       return `Setup recovery with ${(args.guardians as string[]).length} guardians`;
     // Zodiac module execution functions
@@ -582,14 +569,23 @@ export function getTransactionDescription(decoded: DecodedCalldata): string {
     case 'transfer':
       return `ERC20 transfer: ${args.amount} to ${args.to}`;
     case 'approve':
-      return `ERC20 approve: ${args.spender} for ${args.amount}`;
+      return decoded.transactionType === 'erc721_transfer'
+        ? `ERC721 approve: token #${args.amount} to ${args.spender}`
+        : `ERC20 approve: ${args.spender} for ${args.amount}`;
     case 'transferFrom':
-      return `ERC20 transferFrom: ${args.amount} from ${args.from} to ${args.to}`;
-    // ERC721 token functions
+      return decoded.transactionType === 'erc721_transfer'
+        ? `ERC721 transferFrom: token #${args.amount} from ${args.from} to ${args.to}`
+        : `ERC20 transferFrom: ${args.amount} from ${args.from} to ${args.to}`;
+    // ERC721 / ERC1155 token functions
     case 'safeTransferFrom':
+      if (args.amount !== undefined) {
+        return `ERC1155 safeTransferFrom: ${args.amount}x token #${args.id} from ${args.from} to ${args.to}`;
+      }
       return args.data !== undefined
         ? `ERC721 safeTransferFrom: token #${args.tokenId} from ${args.from} to ${args.to} (with data)`
         : `ERC721 safeTransferFrom: token #${args.tokenId} from ${args.from} to ${args.to}`;
+    case 'safeBatchTransferFrom':
+      return `ERC1155 safeBatchTransferFrom: from ${args.from} to ${args.to}`;
     default:
       return `${decoded.transactionType}: ${fn}`;
   }

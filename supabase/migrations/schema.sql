@@ -8,7 +8,7 @@
 --
 -- USAGE:
 --   1. Run this entire file in Supabase SQL Editor
---   2. Create your schema: SELECT create_network_schema('testnet');
+--   2. Create your schema: SELECT create_quaivault_schema('testnet');
 --   3. Expose schema to API (see bottom of file)
 --
 -- ============================================
@@ -22,7 +22,7 @@ DO $$
 BEGIN
     -- Transaction status enum
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'transaction_status') THEN
-        CREATE TYPE public.transaction_status AS ENUM ('pending', 'executed', 'cancelled');
+        CREATE TYPE public.transaction_status AS ENUM ('pending', 'executed', 'cancelled', 'expired', 'failed');
     END IF;
 END
 $$;
@@ -57,7 +57,11 @@ BEGIN
             'external_call',
             'unknown',
             'module_execution',
-            'batched_call'
+            'batched_call',
+            'erc20_transfer',
+            'erc721_transfer',
+            'erc1155_transfer',
+            'message_signing'
         );
     END IF;
 END
@@ -112,10 +116,94 @@ $$;
 
 DO $$
 BEGIN
-    -- Token standard enum (ERC20, ERC721)
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'token_standard') THEN
-        CREATE TYPE public.token_standard AS ENUM ('ERC20', 'ERC721');
+    -- Add 'erc721_transfer' to transaction_type enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'erc721_transfer'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_type')
+    ) THEN
+        ALTER TYPE public.transaction_type ADD VALUE 'erc721_transfer';
     END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Add 'message_signing' to transaction_type enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'message_signing'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_type')
+    ) THEN
+        ALTER TYPE public.transaction_type ADD VALUE 'message_signing';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Add 'erc1155_transfer' to transaction_type enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'erc1155_transfer'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_type')
+    ) THEN
+        ALTER TYPE public.transaction_type ADD VALUE 'erc1155_transfer';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Add 'expired' to transaction_status enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'expired'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_status')
+    ) THEN
+        ALTER TYPE public.transaction_status ADD VALUE 'expired';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Add 'failed' to transaction_status enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'failed'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'transaction_status')
+    ) THEN
+        ALTER TYPE public.transaction_status ADD VALUE 'failed';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Token standard enum (ERC20, ERC721, ERC1155)
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'token_standard') THEN
+        CREATE TYPE public.token_standard AS ENUM ('ERC20', 'ERC721', 'ERC1155');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Add 'ERC1155' to token_standard enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'ERC1155'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'token_standard')
+    ) THEN
+        ALTER TYPE public.token_standard ADD VALUE 'ERC1155';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
 END
 $$;
 
@@ -133,7 +221,7 @@ $$;
 -- ============================================
 -- Use this to completely remove a schema and all its data
 
-CREATE OR REPLACE FUNCTION drop_network_schema(network_name TEXT)
+CREATE OR REPLACE FUNCTION drop_quaivault_schema(network_name TEXT)
 RETURNS void AS $$
 DECLARE
     schema_name TEXT := network_name;
@@ -147,10 +235,8 @@ BEGIN
     EXECUTE format('DROP TABLE IF EXISTS %I.social_recoveries CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.social_recovery_guardians CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.social_recovery_configs CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.signed_messages CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.module_executions CASCADE', schema_name);
-    EXECUTE format('DROP TABLE IF EXISTS %I.module_transactions CASCADE', schema_name);
-    EXECUTE format('DROP TABLE IF EXISTS %I.whitelist_entries CASCADE', schema_name);
-    EXECUTE format('DROP TABLE IF EXISTS %I.daily_limit_state CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.deposits CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.wallet_modules CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.confirmations CASCADE', schema_name);
@@ -167,7 +253,7 @@ $$ LANGUAGE plpgsql;
 -- MAIN SCHEMA CREATION FUNCTION
 -- ============================================
 
-CREATE OR REPLACE FUNCTION create_network_schema(network_name TEXT)
+CREATE OR REPLACE FUNCTION create_quaivault_schema(network_name TEXT)
 RETURNS void AS $$
 DECLARE
     schema_name TEXT := network_name;
@@ -189,6 +275,7 @@ BEGIN
             owner_count INTEGER NOT NULL,
             created_at_block BIGINT NOT NULL,
             created_at_tx TEXT NOT NULL,
+            min_execution_delay INTEGER DEFAULT 0,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )', schema_name);
@@ -229,6 +316,12 @@ BEGIN
             executed_by TEXT,
             cancelled_at_block BIGINT,
             cancelled_at_tx TEXT,
+            expiration BIGINT DEFAULT 0,
+            execution_delay INTEGER DEFAULT 0,
+            approved_at BIGINT,
+            executable_after BIGINT,
+            is_expired BOOLEAN DEFAULT FALSE,
+            failed_return_data TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(wallet_address, tx_hash)
@@ -300,54 +393,6 @@ BEGIN
     ', schema_name);
 
     -- ============================================
-    -- MODULE TABLES
-    -- ============================================
-
-    -- Daily limit state
-    EXECUTE format('
-        CREATE TABLE IF NOT EXISTS %I.daily_limit_state (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            wallet_address TEXT NOT NULL REFERENCES %I.wallets(address) ON DELETE CASCADE,
-            daily_limit TEXT NOT NULL,
-            spent_today TEXT DEFAULT ''0'',
-            last_reset_day DATE NOT NULL DEFAULT CURRENT_DATE,
-            updated_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(wallet_address)
-        )', schema_name, schema_name);
-
-    -- Whitelist entries
-    EXECUTE format('
-        CREATE TABLE IF NOT EXISTS %I.whitelist_entries (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            wallet_address TEXT NOT NULL REFERENCES %I.wallets(address) ON DELETE CASCADE,
-            whitelisted_address TEXT NOT NULL,
-            limit_amount TEXT,
-            added_at_block BIGINT NOT NULL,
-            added_at_tx TEXT,
-            removed_at_block BIGINT,
-            removed_at_tx TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(wallet_address, whitelisted_address, added_at_block)
-        )', schema_name, schema_name);
-
-    -- Module transactions
-    EXECUTE format('
-        CREATE TABLE IF NOT EXISTS %I.module_transactions (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            wallet_address TEXT NOT NULL REFERENCES %I.wallets(address) ON DELETE CASCADE,
-            module_type public.module_type NOT NULL,
-            module_address TEXT NOT NULL,
-            to_address TEXT NOT NULL,
-            value TEXT NOT NULL,
-            remaining_limit TEXT,
-            executed_at_block BIGINT NOT NULL,
-            executed_at_tx TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(wallet_address, module_address, executed_at_tx)
-        )', schema_name, schema_name);
-
-    -- ============================================
     -- ZODIAC MODULE EXECUTIONS TABLE
     -- ============================================
     -- Tracks ExecutionFromModuleSuccess and ExecutionFromModuleFailure events
@@ -364,8 +409,9 @@ BEGIN
             data_hash TEXT,
             executed_at_block BIGINT NOT NULL,
             executed_at_tx TEXT NOT NULL,
+            log_index INTEGER,
             created_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(wallet_address, module_address, executed_at_tx)
+            UNIQUE(wallet_address, module_address, executed_at_tx, log_index)
         )', schema_name, schema_name);
 
     -- ============================================
@@ -461,7 +507,7 @@ BEGIN
             created_at TIMESTAMPTZ DEFAULT NOW()
         )', schema_name);
 
-    -- Token transfer events (ERC20/ERC721 transfers involving tracked vaults)
+    -- Token transfer events (ERC20/ERC721/ERC1155 transfers involving tracked vaults)
     EXECUTE format('
         CREATE TABLE IF NOT EXISTS %I.token_transfers (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -471,13 +517,34 @@ BEGIN
             to_address TEXT NOT NULL,
             value TEXT NOT NULL,
             token_id TEXT,
+            batch_index INTEGER NOT NULL DEFAULT 0,
             direction public.transfer_direction NOT NULL,
             block_number BIGINT NOT NULL,
             transaction_hash TEXT NOT NULL,
             log_index INTEGER NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(transaction_hash, log_index, wallet_address)
+            UNIQUE(transaction_hash, log_index, batch_index, wallet_address)
         )', schema_name, schema_name, schema_name);
+
+    -- ============================================
+    -- EIP-1271 SIGNED MESSAGES TABLE
+    -- ============================================
+
+    EXECUTE format('
+        CREATE TABLE IF NOT EXISTS %I.signed_messages (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            wallet_address TEXT NOT NULL REFERENCES %I.wallets(address) ON DELETE CASCADE,
+            msg_hash TEXT NOT NULL,
+            data TEXT,
+            signed_at_block BIGINT NOT NULL,
+            signed_at_tx TEXT NOT NULL,
+            unsigned_at_block BIGINT,
+            unsigned_at_tx TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(wallet_address, msg_hash)
+        )', schema_name, schema_name);
 
     -- ============================================
     -- INDEXES
@@ -493,7 +560,6 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_confirmations_active ON %I.confirmations(wallet_address, tx_hash) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_wallet_modules_active ON %I.wallet_modules(wallet_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_deposits_wallet ON %I.deposits(wallet_address)', schema_name);
-    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_module_transactions_wallet ON %I.module_transactions(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_configs_wallet ON %I.social_recovery_configs(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_guardians_wallet ON %I.social_recovery_guardians(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recoveries_wallet ON %I.social_recoveries(wallet_address)', schema_name);
@@ -510,6 +576,10 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_token_transfers_token ON %I.token_transfers(token_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_token_transfers_wallet_token ON %I.token_transfers(wallet_address, token_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_token_transfers_block ON %I.token_transfers(block_number)', schema_name);
+
+    -- Signed messages indexes
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_signed_messages_wallet ON %I.signed_messages(wallet_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_signed_messages_active ON %I.signed_messages(wallet_address) WHERE is_active = TRUE', schema_name);
 
     -- ============================================
     -- FUNCTIONS & TRIGGERS
@@ -612,6 +682,9 @@ BEGIN
     EXECUTE format('DROP TRIGGER IF EXISTS trigger_social_recoveries_updated_at ON %I.social_recoveries', schema_name);
     EXECUTE format('CREATE TRIGGER trigger_social_recoveries_updated_at BEFORE UPDATE ON %I.social_recoveries FOR EACH ROW EXECUTE FUNCTION public.update_updated_at()', schema_name);
 
+    EXECUTE format('DROP TRIGGER IF EXISTS trigger_signed_messages_updated_at ON %I.signed_messages', schema_name);
+    EXECUTE format('CREATE TRIGGER trigger_signed_messages_updated_at BEFORE UPDATE ON %I.signed_messages FOR EACH ROW EXECUTE FUNCTION public.update_updated_at()', schema_name);
+
     -- ============================================
     -- ROW LEVEL SECURITY
     -- ============================================
@@ -623,9 +696,6 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.confirmations ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.wallet_modules ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.deposits ENABLE ROW LEVEL SECURITY', schema_name);
-    EXECUTE format('ALTER TABLE %I.daily_limit_state ENABLE ROW LEVEL SECURITY', schema_name);
-    EXECUTE format('ALTER TABLE %I.whitelist_entries ENABLE ROW LEVEL SECURITY', schema_name);
-    EXECUTE format('ALTER TABLE %I.module_transactions ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.module_executions ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.social_recovery_configs ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.social_recovery_guardians ENABLE ROW LEVEL SECURITY', schema_name);
@@ -634,6 +704,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.indexer_state ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.tokens ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.token_transfers ENABLE ROW LEVEL SECURITY', schema_name);
+    EXECUTE format('ALTER TABLE %I.signed_messages ENABLE ROW LEVEL SECURITY', schema_name);
 
     -- Public read policies
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.wallets', schema_name);
@@ -648,12 +719,6 @@ BEGIN
     EXECUTE format('CREATE POLICY "Public read access" ON %I.wallet_modules FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.deposits', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.deposits FOR SELECT USING (true)', schema_name);
-    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.daily_limit_state', schema_name);
-    EXECUTE format('CREATE POLICY "Public read access" ON %I.daily_limit_state FOR SELECT USING (true)', schema_name);
-    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.whitelist_entries', schema_name);
-    EXECUTE format('CREATE POLICY "Public read access" ON %I.whitelist_entries FOR SELECT USING (true)', schema_name);
-    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.module_transactions', schema_name);
-    EXECUTE format('CREATE POLICY "Public read access" ON %I.module_transactions FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.module_executions', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.module_executions FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.social_recovery_configs', schema_name);
@@ -670,6 +735,8 @@ BEGIN
     EXECUTE format('CREATE POLICY "Public read access" ON %I.tokens FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.token_transfers', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.token_transfers FOR SELECT USING (true)', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.signed_messages', schema_name);
+    EXECUTE format('CREATE POLICY "Public read access" ON %I.signed_messages FOR SELECT USING (true)', schema_name);
 
     -- Service role write policies (with WITH CHECK for INSERT/UPDATE)
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.wallets', schema_name);
@@ -684,12 +751,6 @@ BEGIN
     EXECUTE format('CREATE POLICY "Service write access" ON %I.wallet_modules FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.deposits', schema_name);
     EXECUTE format('CREATE POLICY "Service write access" ON %I.deposits FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
-    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.daily_limit_state', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.daily_limit_state FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
-    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.whitelist_entries', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.whitelist_entries FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
-    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.module_transactions', schema_name);
-    EXECUTE format('CREATE POLICY "Service write access" ON %I.module_transactions FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.module_executions', schema_name);
     EXECUTE format('CREATE POLICY "Service write access" ON %I.module_executions FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.social_recovery_configs', schema_name);
@@ -706,6 +767,8 @@ BEGIN
     EXECUTE format('CREATE POLICY "Service write access" ON %I.tokens FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.token_transfers', schema_name);
     EXECUTE format('CREATE POLICY "Service write access" ON %I.token_transfers FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.signed_messages', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.signed_messages FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
 
     -- ============================================
     -- GRANT PERMISSIONS
@@ -764,27 +827,12 @@ BEGIN
     END;
 
     BEGIN
-        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.module_transactions', schema_name);
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-
-    BEGIN
         EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.social_recoveries', schema_name);
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
 
     BEGIN
         EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.social_recovery_approvals', schema_name);
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-
-    BEGIN
-        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.daily_limit_state', schema_name);
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-
-    BEGIN
-        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.whitelist_entries', schema_name);
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
 
@@ -813,6 +861,14 @@ BEGIN
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
 
+    BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.signed_messages', schema_name);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+
+    -- Reload PostgREST schema cache so new/changed columns are immediately visible
+    NOTIFY pgrst, 'reload config';
+
     RAISE NOTICE 'Schema "%" created successfully with all tables, indexes, triggers, policies, permissions, and realtime', schema_name;
 END;
 $$ LANGUAGE plpgsql;
@@ -825,8 +881,8 @@ $$ LANGUAGE plpgsql;
 --   (This creates the enum types and helper functions)
 --
 -- STEP 2: Create your network schema
---   SELECT create_network_schema('testnet');  -- For testnet
---   SELECT create_network_schema('mainnet');  -- For mainnet
+--   SELECT create_quaivault_schema('testnet');  -- For testnet
+--   SELECT create_quaivault_schema('mainnet');  -- For mainnet
 --
 -- STEP 3: CRITICAL - Expose schema to PostgREST API
 --   ALTER ROLE authenticator SET pgrst.db_schemas TO 'public, graphql_public, testnet, mainnet';
@@ -839,8 +895,8 @@ $$ LANGUAGE plpgsql;
 --   SELECT table_name FROM information_schema.tables WHERE table_schema = 'testnet' ORDER BY table_name;
 --
 -- RESET A SCHEMA (WARNING: deletes all data!):
---   SELECT drop_network_schema('testnet');
---   SELECT create_network_schema('testnet');
+--   SELECT drop_quaivault_schema('testnet');
+--   SELECT create_quaivault_schema('testnet');
 --
 -- LIST ALL SCHEMAS:
 --   SELECT schema_name FROM information_schema.schemata

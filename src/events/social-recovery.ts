@@ -8,7 +8,10 @@ import { supabase } from '../services/supabase.js';
 import { quai } from '../services/quai.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
-import { validateEventArgs } from './helpers.js';
+import { validateEventArgs, safeParseInt } from './helpers.js';
+
+/** Matches SocialRecoveryModule contract MAX_GUARDIANS (defense-in-depth). */
+const MAX_GUARDIANS = 20;
 
 export async function handleRecoverySetup(event: DecodedEvent): Promise<void> {
   const { wallet, guardians, threshold, recoveryPeriod } = validateEventArgs<{
@@ -18,11 +21,19 @@ export async function handleRecoverySetup(event: DecodedEvent): Promise<void> {
     recoveryPeriod: string;
   }>(event.args, ['wallet', 'guardians', 'threshold', 'recoveryPeriod'], 'RecoverySetup');
 
+  if (guardians.length > MAX_GUARDIANS) {
+    logger.error(
+      { wallet, guardianCount: guardians.length, max: MAX_GUARDIANS, tx: event.transactionHash },
+      'RecoverySetup guardians exceed contract MAX_GUARDIANS, skipping invalid event'
+    );
+    return;
+  }
+
   await supabase.upsertRecoveryConfig({
     walletAddress: wallet,
     guardians: guardians,
-    threshold: parseInt(threshold),
-    recoveryPeriod: parseInt(recoveryPeriod),
+    threshold: safeParseInt(threshold, 'RecoverySetup.threshold'),
+    recoveryPeriod: safeParseInt(recoveryPeriod, 'RecoverySetup.recoveryPeriod'),
     setupAtBlock: event.blockNumber,
     setupAtTx: event.transactionHash,
   });
@@ -43,6 +54,9 @@ export async function handleRecoveryInitiated(event: DecodedEvent): Promise<void
   }>(event.args, ['wallet', 'recoveryHash', 'newOwners', 'newThreshold', 'initiator'], 'RecoveryInitiated');
 
   const recoveryConfig = await supabase.getRecoveryConfig(wallet);
+  if (!recoveryConfig) {
+    logger.warn({ wallet }, 'RecoveryInitiated without prior RecoverySetup — using defaults');
+  }
   const recoveryPeriod = recoveryConfig?.recoveryPeriod || 0;
 
   const blockTimestamp = await withRetry(
@@ -50,12 +64,16 @@ export async function handleRecoveryInitiated(event: DecodedEvent): Promise<void
     { operation: `getBlockTimestamp(${event.blockNumber})` }
   );
   const executionTime = blockTimestamp + recoveryPeriod;
+  if (!Number.isSafeInteger(executionTime)) {
+    logger.error({ blockTimestamp, recoveryPeriod, wallet }, 'executionTime exceeds safe integer range');
+    return;
+  }
 
   await supabase.upsertRecovery({
     walletAddress: wallet,
     recoveryHash: recoveryHash,
     newOwners: newOwners,
-    newThreshold: parseInt(newThreshold),
+    newThreshold: safeParseInt(newThreshold, 'RecoveryInitiated.newThreshold'),
     initiatorAddress: initiator,
     approvalCount: 0,
     requiredThreshold: recoveryConfig?.threshold || 1,

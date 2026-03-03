@@ -127,7 +127,7 @@ export function useNetwork() {
 
 ## Schema Setup (Important!)
 
-After creating a network schema with `create_network_schema()`, you **must expose it to the PostgREST API**. Without this step, the frontend will get `PGRST205` errors.
+After creating a network schema with `create_quaivault_schema()`, you **must expose it to the PostgREST API**. Without this step, the frontend will get `PGRST205` errors.
 
 Run this in Supabase SQL Editor:
 
@@ -150,22 +150,22 @@ SELECT rolname, rolconfig FROM pg_roles WHERE rolname = 'authenticator';
 
 | Table | Description | Key Fields |
 |-------|-------------|------------|
-| `wallets` | Deployed multisig wallets | `address`, `threshold`, `owner_count` |
+| `wallets` | Deployed multisig wallets | `address`, `threshold`, `owner_count`, `min_execution_delay` |
 | `wallet_owners` | Wallet owner addresses | `wallet_address`, `owner_address`, `is_active` |
 | `transactions` | Proposed multisig transactions | `wallet_address`, `tx_hash`, `status`, `confirmation_count`, `executed_by` |
 | `confirmations` | Owner approvals | `wallet_address`, `tx_hash`, `owner_address`, `is_active` |
 | `wallet_modules` | Enabled modules per wallet | `wallet_address`, `module_address`, `is_active` |
 | `deposits` | QUAI received by wallets | `wallet_address`, `sender_address`, `amount` |
-| `indexer_state` | Indexer sync status | `last_indexed_block`, `is_syncing` |
+| `indexer_state` | Indexer sync status | `last_indexed_block`, `last_block_hash`, `is_syncing` |
 
-### Module Tables
+### Module & Token Tables
 
 | Table | Description |
 |-------|-------------|
-| `daily_limit_state` | Daily spending limit configuration |
-| `whitelist_entries` | Whitelisted addresses for a wallet |
-| `module_transactions` | Transactions executed via modules (DailyLimit, Whitelist) |
 | `module_executions` | Zodiac IAvatar module execution results (success/failure) |
+| `signed_messages` | EIP-1271 signed message hashes |
+| `tokens` | Auto-discovered ERC20/ERC721/ERC1155 token metadata |
+| `token_transfers` | Token transfer history for tracked wallets (ERC1155 TransferBatch fans out to one row per id/value pair) |
 
 ### Social Recovery Tables
 
@@ -293,45 +293,60 @@ async function getEnabledModules(walletAddress: string) {
 }
 ```
 
-### Get Daily Limit State
+### Get Signed Messages (EIP-1271)
 
 ```typescript
-async function getDailyLimitState(walletAddress: string) {
+async function getSignedMessages(walletAddress: string) {
   const { data, error } = await supabase
-    .from('daily_limit_state')
+    .from('signed_messages')
     .select('*')
     .eq('wallet_address', walletAddress.toLowerCase())
-    .single();
-
-  return data;
-}
-```
-
-### Get Whitelist Entries
-
-```typescript
-async function getWhitelistEntries(walletAddress: string) {
-  const { data, error } = await supabase
-    .from('whitelist_entries')
-    .select('*')
-    .eq('wallet_address', walletAddress.toLowerCase())
-    .eq('is_active', true);
+    .eq('is_active', true)
+    .order('signed_at_block', { ascending: false });
 
   return data ?? [];
 }
 ```
 
-### Get Module Transactions
+### Get Token Transfers
 
 ```typescript
-async function getModuleTransactions(walletAddress: string) {
+async function getTokenTransfers(walletAddress: string) {
   const { data, error } = await supabase
-    .from('module_transactions')
-    .select('*')
+    .from('token_transfers')
+    .select(`
+      *,
+      tokens (
+        symbol,
+        name,
+        decimals,
+        standard
+      )
+    `)
     .eq('wallet_address', walletAddress.toLowerCase())
-    .order('created_at', { ascending: false });
+    .order('block_number', { ascending: false });
 
   return data ?? [];
+}
+```
+
+### Get Tracked Tokens
+
+```typescript
+async function getTrackedTokens(walletAddress: string) {
+  // Get distinct tokens this wallet has interacted with
+  const { data, error } = await supabase
+    .from('token_transfers')
+    .select('token_address, tokens(symbol, name, decimals, standard)')
+    .eq('wallet_address', walletAddress.toLowerCase());
+
+  // Deduplicate by token address
+  const seen = new Set<string>();
+  return (data ?? []).filter(t => {
+    if (seen.has(t.token_address)) return false;
+    seen.add(t.token_address);
+    return true;
+  });
 }
 ```
 
@@ -347,7 +362,7 @@ async function getIndexerState() {
     .eq('id', 'main')
     .single();
 
-  return data; // { last_indexed_block, is_syncing, last_indexed_at }
+  return data; // { last_indexed_block, last_block_hash, is_syncing, last_indexed_at }
 }
 ```
 
@@ -394,7 +409,7 @@ Supabase Realtime enables live updates without polling. Subscribe to tables that
 
 ### Enable Realtime for Custom Schemas
 
-**Good news:** If you created your schema using `create_network_schema()` from `schema.sql`, **Realtime is automatically enabled** for all tables. No manual setup required.
+**Good news:** If you created your schema using `create_quaivault_schema()` from `schema.sql`, **Realtime is automatically enabled** for all tables. No manual setup required.
 
 If you need to manually enable Realtime (e.g., for a schema created before this feature), run in Supabase SQL Editor:
 
@@ -407,9 +422,9 @@ ALTER PUBLICATION supabase_realtime ADD TABLE testnet.confirmations;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.deposits;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.wallet_modules;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.module_executions;
-ALTER PUBLICATION supabase_realtime ADD TABLE testnet.module_transactions;
-ALTER PUBLICATION supabase_realtime ADD TABLE testnet.daily_limit_state;
-ALTER PUBLICATION supabase_realtime ADD TABLE testnet.whitelist_entries;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.signed_messages;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.tokens;
+ALTER PUBLICATION supabase_realtime ADD TABLE testnet.token_transfers;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.social_recoveries;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.social_recovery_approvals;
 ALTER PUBLICATION supabase_realtime ADD TABLE testnet.social_recovery_configs;
@@ -551,53 +566,26 @@ function subscribeToRecovery(
 }
 ```
 
-### Subscribe to Daily Limit Changes
+### Subscribe to Token Transfers
 
 ```typescript
-function subscribeToDailyLimit(
+function subscribeToTokenTransfers(
   supabase: SupabaseClient,
   schema: 'testnet' | 'mainnet',
   walletAddress: string,
-  onChange: (state: DailyLimitState) => void
+  onTransfer: (transfer: TokenTransfer) => void
 ) {
   const channel = supabase
-    .channel(`daily_limit:${walletAddress}`)
+    .channel(`token_transfers:${walletAddress}`)
     .on(
       'postgres_changes',
       {
-        event: '*',
+        event: 'INSERT',
         schema: schema,
-        table: 'daily_limit_state',
+        table: 'token_transfers',
         filter: `wallet_address=eq.${walletAddress.toLowerCase()}`
       },
-      (payload) => onChange(payload.new as DailyLimitState)
-    )
-    .subscribe();
-
-  return () => supabase.removeChannel(channel);
-}
-```
-
-### Subscribe to Whitelist Changes
-
-```typescript
-function subscribeToWhitelist(
-  supabase: SupabaseClient,
-  schema: 'testnet' | 'mainnet',
-  walletAddress: string,
-  onChange: (entry: WhitelistEntry) => void
-) {
-  const channel = supabase
-    .channel(`whitelist:${walletAddress}`)
-    .on(
-      'postgres_changes',
-      {
-        event: '*',
-        schema: schema,
-        table: 'whitelist_entries',
-        filter: `wallet_address=eq.${walletAddress.toLowerCase()}`
-      },
-      (payload) => onChange(payload.new as WhitelistEntry)
+      (payload) => onTransfer(payload.new as TokenTransfer)
     )
     .subscribe();
 
@@ -614,6 +602,7 @@ interface Wallet {
   name: string | null;
   threshold: number;
   owner_count: number;
+  min_execution_delay: number; // seconds before approved tx can execute (0 = immediate)
   created_at_block: number;
   created_at_tx: string;
   created_at: string;
@@ -639,18 +628,24 @@ interface Transaction {
   to_address: string;
   value: string; // BigInt as string
   data: string | null;
-  transaction_type: 'transfer' | 'wallet_admin' | 'module_config' | 'recovery_setup' | 'external_call' | 'module_execution' | 'batched_call' | 'unknown';
+  transaction_type: 'transfer' | 'wallet_admin' | 'module_config' | 'recovery_setup' | 'message_signing' | 'external_call' | 'module_execution' | 'batched_call' | 'erc20_transfer' | 'erc721_transfer' | 'erc1155_transfer' | 'unknown';
   decoded_params: Record<string, unknown> | null;
-  status: 'pending' | 'executed' | 'cancelled';
+  status: 'pending' | 'executed' | 'cancelled' | 'expired' | 'failed';
   confirmation_count: number;
   submitted_by: string;
   submitted_at_block: number;
   submitted_at_tx: string;
   executed_at_block: number | null;
   executed_at_tx: string | null;
-  executed_by: string | null; // Address that executed the transaction
+  executed_by: string | null;
   cancelled_at_block: number | null;
   cancelled_at_tx: string | null;
+  expiration: number | null;        // uint48, 0 = no expiry
+  execution_delay: number | null;   // uint32, 0 = immediate
+  approved_at: number | null;       // Set by ThresholdReached
+  executable_after: number | null;  // approved_at + execution_delay
+  is_expired: boolean | null;
+  failed_return_data: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -682,6 +677,7 @@ interface Deposit {
 interface IndexerState {
   id: string; // Always 'main'
   last_indexed_block: number;
+  last_block_hash: string | null; // For reorg detection
   last_indexed_at: string | null;
   is_syncing: boolean;
   updated_at: string;
@@ -700,25 +696,44 @@ interface WalletModule {
   updated_at: string;
 }
 
-interface DailyLimitState {
+interface SignedMessage {
   id: string;
   wallet_address: string;
-  daily_limit: string;
-  spent_today: string;
-  last_reset_day: string;
+  msg_hash: string;
+  data: string | null;
+  signed_at_block: number;
+  signed_at_tx: string;
+  unsigned_at_block: number | null;
+  unsigned_at_tx: string | null;
+  is_active: boolean;
+  created_at: string;
   updated_at: string;
 }
 
-interface WhitelistEntry {
+interface Token {
   id: string;
+  address: string;
+  standard: 'ERC20' | 'ERC721' | 'ERC1155';
+  symbol: string;
+  name: string;
+  decimals: number;
+  discovered_via: string | null; // 'seed', 'transfer_scan', etc.
+  created_at: string;
+}
+
+interface TokenTransfer {
+  id: string;
+  token_address: string;
   wallet_address: string;
-  whitelisted_address: string;
-  limit_amount: string | null;
-  added_at_block: number;
-  added_at_tx: string | null;
-  removed_at_block: number | null;
-  removed_at_tx: string | null;
-  is_active: boolean;
+  from_address: string;
+  to_address: string;
+  value: string;
+  token_id: string | null;   // ERC721 / ERC1155 token ID
+  batch_index: number;       // 0 for single transfers, array index for ERC1155 TransferBatch
+  direction: 'inflow' | 'outflow';
+  block_number: number;
+  transaction_hash: string;
+  log_index: number;
   created_at: string;
 }
 
@@ -779,19 +794,6 @@ interface RecoveryApproval {
   created_at: string;
 }
 
-interface ModuleTransaction {
-  id: string;
-  wallet_address: string;
-  module_type: 'daily_limit' | 'whitelist' | 'social_recovery';
-  module_address: string;
-  to_address: string;
-  value: string;
-  remaining_limit: string | null;
-  executed_at_block: number;
-  executed_at_tx: string;
-  created_at: string;
-}
-
 // Zodiac IAvatar module execution tracking
 interface ModuleExecution {
   id: string;
@@ -815,12 +817,16 @@ The indexer decodes transaction calldata and stores the type in `transaction_typ
 | Type | Description |
 |------|-------------|
 | `transfer` | Native QUAI transfer (no calldata) |
-| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule |
-| `module_config` | setDailyLimit, addToWhitelist, setupRecovery, etc. |
+| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay |
+| `module_config` | setupRecovery, etc. |
 | `recovery_setup` | Social recovery configuration |
-| `external_call` | Generic contract interaction |
+| `message_signing` | signMessage, unsignMessage (EIP-1271) |
 | `module_execution` | Zodiac IAvatar module execution (via execTransactionFromModule) |
 | `batched_call` | MultiSend batched transaction |
+| `erc20_transfer` | ERC20 token operations (transfer, approve, transferFrom) |
+| `erc721_transfer` | ERC721 token operations (safeTransferFrom) |
+| `erc1155_transfer` | ERC1155 token operations (safeTransferFrom, safeBatchTransferFrom) |
+| `external_call` | Generic contract interaction |
 | `unknown` | Unrecognized calldata |
 
 Decoded parameters are stored in `decoded_params` as JSON:
@@ -1025,7 +1031,6 @@ interface HealthStatus {
     lastIndexedBlock: number | null;
     blocksBehind: number | null;
     isSyncing: boolean;
-    trackedWallets: number;
   };
 }
 
@@ -1181,14 +1186,14 @@ async function getTransactionExecutor(walletAddress: string, txHash: string) {
 
 ## Indexed Events Summary
 
-The indexer captures 27 blockchain events from 5 contract sources:
+The indexer captures 27 blockchain events from 3 contract sources (plus ERC20/ERC721/ERC1155 Transfer wildcard):
 
 | Contract | Events |
 |----------|--------|
 | QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
-| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `ModuleEnabled`, `ModuleDisabled`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure` |
-| DailyLimitModule | `DailyLimitSet`, `DailyLimitReset`, `TransactionExecuted` |
-| WhitelistModule | `AddressWhitelisted`, `AddressRemovedFromWhitelist`, `WhitelistTransactionExecuted` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `ModuleEnabled`, `ModuleDisabled`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
 | SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled` |
+| ERC20/ERC721 | `Transfer` (wildcard scan for auto-discovered tokens) |
+| ERC1155 | `TransferSingle`, `TransferBatch` (wildcard scan for auto-discovered tokens) |
 
 For detailed event-to-table mappings and E2E test coverage, see [TESTING.md](TESTING.md).

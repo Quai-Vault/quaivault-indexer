@@ -4,11 +4,13 @@ A blockchain indexing service for QuaiVault multisig wallets on Quai Network. In
 
 ## Features
 
-- Indexes 27 event types from QuaiVault, ProxyFactory, and module contracts (including Zodiac IAvatar events)
+- Indexes 26 event types from QuaiVault, Factory, and module contracts (plus ERC20/ERC721/ERC1155 Transfer wildcard)
 - Real-time updates via Supabase Realtime subscriptions
 - Historical backfill with resume capability
 - Transaction type decoding (transfer, wallet_admin, module_config, etc.)
-- Social recovery, daily limit, and whitelist module support
+- Social recovery module support
+- ERC20/ERC721/ERC1155 token auto-discovery and transfer tracking
+- EIP-1271 message signing tracking
 - Health check endpoint for monitoring and orchestration
 - Graceful shutdown and error recovery
 
@@ -50,12 +52,10 @@ Copy `.env.example` to `.env` and configure:
 # Required
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_KEY=your-service-role-key
-PROXY_FACTORY_ADDRESS=0x...
+QUAIVAULT_FACTORY_ADDRESS=0x...
 QUAIVAULT_IMPLEMENTATION_ADDRESS=0x...
 
 # Optional - Module and utility contracts (if deployed)
-DAILY_LIMIT_MODULE_ADDRESS=0x...
-WHITELIST_MODULE_ADDRESS=0x...
 SOCIAL_RECOVERY_MODULE_ADDRESS=0x...
 MULTISEND_ADDRESS=0x...
 
@@ -73,7 +73,7 @@ NODE_ENV=development
 
 # Optional - Health check
 HEALTH_CHECK_ENABLED=true
-HEALTH_CHECK_PORT=3000
+HEALTH_CHECK_PORT=8080
 HEALTH_MAX_BLOCKS_BEHIND=100
 ```
 
@@ -107,23 +107,36 @@ BACKFILL_FROM=5000000 BACKFILL_TO=5100000 npm run backfill
 
 ```
 src/
-├── index.ts              # Entry point with graceful shutdown
-├── config.ts             # Environment configuration with validation
-├── indexer.ts            # Core indexer with polling loop
-├── backfill.ts           # Standalone historical backfill script
+├── index.ts                # Entry point with graceful shutdown
+├── config.ts               # Environment configuration with validation
+├── indexer.ts              # Core indexer with polling loop
+├── backfill.ts             # Standalone historical backfill script
 ├── events/
-│   └── index.ts          # Event handlers (27 events)
+│   ├── index.ts            # Event dispatcher (routes decoded events to handlers)
+│   ├── factory.ts          # WalletCreated, WalletRegistered
+│   ├── vault-core.ts       # Transaction*, Owner*, Threshold*, Module*, Received
+│   ├── zodiac.ts           # ExecutionFromModuleSuccess/Failure
+│   ├── social-recovery.ts  # Recovery* events
+│   ├── message-signing.ts  # MessageSigned, MessageUnsigned
+│   ├── token-transfer.ts   # ERC20/ERC721/ERC1155 Transfer events
+│   └── helpers.ts          # validateEventArgs, safeParseInt
 ├── services/
-│   ├── quai.ts           # Quai RPC client with retry
-│   ├── supabase.ts       # Database operations
-│   ├── decoder.ts        # Event & calldata decoding
-│   └── health.ts         # Health check HTTP server
+│   ├── quai.ts             # Quai RPC client with retry
+│   ├── supabase.ts         # Database operations
+│   ├── decoder.ts          # Event & calldata decoding
+│   ├── block-processor.ts  # Block range processing with token auto-discovery
+│   └── health.ts           # Health check HTTP server
 ├── types/
-│   └── index.ts          # TypeScript interfaces
+│   └── index.ts            # TypeScript interfaces
 └── utils/
-    ├── logger.ts         # Pino logger with rotation
-    ├── retry.ts          # Exponential backoff utility
-    └── modules.ts        # Module address helper
+    ├── logger.ts           # Pino logger with rotation
+    ├── retry.ts            # Exponential backoff utility
+    ├── validation.ts       # Address, bytes32, block number validation
+    ├── circuit-breaker.ts  # Circuit breaker for RPC fault tolerance
+    ├── rate-limiter.ts     # Token bucket rate limiter for RPC calls
+    ├── ip-rate-limiter.ts  # Per-IP rate limiter for health endpoint
+    ├── timeout.ts          # Promise timeout wrapper
+    └── modules.ts          # Module address helper
 ```
 
 ## Database Schema
@@ -134,34 +147,34 @@ src/
 |-------|-------------|
 | `wallets` | Deployed multisig wallet instances |
 | `wallet_owners` | Wallet owner addresses with active status |
-| `transactions` | Proposed multisig transactions |
+| `transactions` | Proposed multisig transactions (with timelock/expiration) |
 | `confirmations` | Owner approvals for transactions |
 | `wallet_modules` | Enabled modules per wallet |
 | `deposits` | QUAI received by wallets |
+| `module_executions` | Zodiac IAvatar module execution results |
+| `signed_messages` | EIP-1271 signed message hashes |
+| `tokens` | Auto-discovered ERC20/ERC721/ERC1155 token metadata |
+| `token_transfers` | Token transfer history for tracked wallets (including ERC1155 batch fan-out) |
 | `indexer_state` | Sync progress tracking |
 
-### Module Tables
+### Social Recovery Tables
 
 | Table | Description |
 |-------|-------------|
-| `daily_limit_state` | Daily spending limits |
-| `whitelist_entries` | Whitelisted addresses |
-| `module_transactions` | Module-executed transfers |
-| `module_executions` | Zodiac IAvatar module execution results |
 | `social_recovery_configs` | Guardian configurations |
 | `social_recovery_guardians` | Guardian addresses |
 | `social_recoveries` | Recovery requests |
 | `social_recovery_approvals` | Guardian approvals |
 
-## Indexed Events
+## Indexed Events (26 + Token Transfer wildcard)
 
 | Contract | Events |
 |----------|--------|
-| ProxyFactory | `WalletCreated`, `WalletRegistered` |
-| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `ModuleEnabled`, `ModuleDisabled`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure` |
+| QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `ModuleEnabled`, `ModuleDisabled`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
 | SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled` |
-| DailyLimitModule | `DailyLimitSet`, `DailyLimitReset`, `TransactionExecuted` |
-| WhitelistModule | `AddressWhitelisted`, `AddressRemovedFromWhitelist`, `WhitelistTransactionExecuted` |
+| ERC20/ERC721 | `Transfer` (wildcard scan for auto-discovered tokens) |
+| ERC1155 | `TransferSingle`, `TransferBatch` (wildcard scan for auto-discovered tokens) |
 
 ## Transaction Type Decoding
 
@@ -170,31 +183,60 @@ The indexer decodes calldata for proposed transactions:
 | Type | Description |
 |------|-------------|
 | `transfer` | Native QUAI transfer (no data) |
-| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule |
-| `module_config` | setDailyLimit, addToWhitelist, setupRecovery, etc. |
+| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay |
+| `module_config` | setupRecovery, etc. |
 | `recovery_setup` | Social recovery configuration |
+| `message_signing` | signMessage, unsignMessage (EIP-1271) |
 | `module_execution` | execTransactionFromModule (Zodiac IAvatar) |
 | `batched_call` | MultiSend batched transactions |
+| `erc20_transfer` | ERC20 token operations (transfer, approve, transferFrom) |
+| `erc721_transfer` | ERC721 token operations (safeTransferFrom) |
+| `erc1155_transfer` | ERC1155 token operations (safeTransferFrom, safeBatchTransferFrom) |
 | `external_call` | Generic contract interaction |
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SUPABASE_URL` | Yes | - | Supabase project URL |
-| `SUPABASE_SERVICE_KEY` | Yes | - | Supabase service role key |
-| `PROXY_FACTORY_ADDRESS` | Yes | - | ProxyFactory contract address |
-| `QUAIVAULT_IMPLEMENTATION_ADDRESS` | Yes | - | QuaiVault implementation address |
-| `QUAI_RPC_URL` | No | `https://rpc.quai.network` | Quai RPC endpoint (base URL, shard auto-appended) |
-| `BATCH_SIZE` | No | `1000` | Blocks per batch during backfill |
-| `POLL_INTERVAL` | No | `5000` | Milliseconds between polls |
-| `START_BLOCK` | No | `0` | Block to start indexing from |
-| `CONFIRMATIONS` | No | `2` | Blocks to wait before processing |
-| `LOG_LEVEL` | No | `info` | Logging level |
-| `LOG_TO_FILE` | No | `false` | Enable file logging with rotation |
-| `HEALTH_CHECK_ENABLED` | No | `true` | Enable health check HTTP server |
-| `HEALTH_CHECK_PORT` | No | `3000` | Health check server port |
-| `HEALTH_MAX_BLOCKS_BEHIND` | No | `100` | Max blocks behind before unhealthy |
+### Required
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SUPABASE_URL` | - | Supabase project URL |
+| `SUPABASE_SERVICE_KEY` | - | Supabase service role key |
+| `QUAIVAULT_FACTORY_ADDRESS` | - | QuaiVault factory contract address |
+| `QUAIVAULT_IMPLEMENTATION_ADDRESS` | - | QuaiVault implementation address |
+
+### Optional
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUAI_RPC_URL` | `https://rpc.quai.network` | Quai RPC endpoint (base URL, shard auto-appended) |
+| `SUPABASE_SCHEMA` | `public` | Database schema (`dev`, `testnet`, `mainnet`) |
+| `SOCIAL_RECOVERY_MODULE_ADDRESS` | - | SocialRecoveryModule contract address |
+| `MULTISEND_ADDRESS` | - | MultiSend utility contract address |
+| `SEED_TOKEN_ADDRESSES` | - | Comma-separated ERC20/ERC721 addresses to track from startup |
+| `CORS_ALLOWED_ORIGINS` | - | Comma-separated allowed origins for health endpoint |
+| `BATCH_SIZE` | `1000` | Blocks per batch during backfill |
+| `POLL_INTERVAL` | `5000` | Milliseconds between polls |
+| `START_BLOCK` | `0` | Block to start indexing from |
+| `CONFIRMATIONS` | `2` | Blocks to wait before processing |
+| `LOG_LEVEL` | `info` | Logging level (`debug`, `info`, `warn`, `error`) |
+| `LOG_TO_FILE` | `false` | Enable file logging with rotation |
+| `NODE_ENV` | `development` | `development` = pretty console, `production` = JSON |
+| `HEALTH_CHECK_ENABLED` | `true` | Enable health check HTTP server |
+| `HEALTH_CHECK_PORT` | `8080` | Health check server port |
+| `HEALTH_MAX_BLOCKS_BEHIND` | `100` | Max blocks behind before unhealthy |
+
+### Advanced
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RPC_CALL_TIMEOUT_MS` | `30000` | Timeout for individual RPC calls |
+| `CB_FAILURE_THRESHOLD` | `10` | Consecutive failures before circuit breaker opens |
+| `CB_COOLDOWN_MS` | `60000` | Cooldown before retrying after circuit opens |
+| `GET_LOGS_CHUNK_SIZE` | `100` | Max addresses per getLogs call |
+| `RETRY_MAX_RETRIES` | `5` | Max consecutive failures before reset |
+| `RETRY_BASE_DELAY_MS` | `1000` | Initial retry delay |
+| `RETRY_MAX_DELAY_MS` | `60000` | Max retry delay cap |
 
 ## Logging
 
@@ -258,7 +300,8 @@ ORDER BY created_at DESC LIMIT 20;
 
 ## Related Documentation
 
-- [TESTING.md](TESTING.md) - Manual testing procedures
+- [TESTING.md](TESTING.md) - Unit and E2E testing guide
+- [DEPLOYMENT.md](DEPLOYMENT.md) - VPS deployment (Docker / systemd)
 - [INDEXER_FRONTEND_INTEGRATION.md](INDEXER_FRONTEND_INTEGRATION.md) - Frontend integration guide
 
 ## License

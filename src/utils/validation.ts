@@ -93,6 +93,27 @@ export function validateBytes32(hash: unknown, fieldName: string): string {
  *
  * Validates: 0x-prefixed, 40 hex characters, total length 42.
  */
+/** Max hex data length stored in TEXT columns (128 KB of hex = 64 KB binary). */
+export const MAX_HEX_DATA_LENGTH = 131_072;
+
+/**
+ * Validates a hex data string does not exceed the maximum allowed length.
+ * Returns null for null/undefined/non-string values (optional fields).
+ * Throws if the string exceeds maxLength.
+ */
+export function validateHexData(
+  data: unknown,
+  fieldName: string,
+  maxLength = MAX_HEX_DATA_LENGTH
+): string | null {
+  if (data === null || data === undefined) return null;
+  if (typeof data !== 'string') return null;
+  if (data.length > maxLength) {
+    throw new Error(`${fieldName} exceeds max length (${data.length} > ${maxLength})`);
+  }
+  return data;
+}
+
 export function normalizeTokenParticipant(address: unknown, fieldName: string): string {
   if (typeof address !== 'string') {
     throw new Error(

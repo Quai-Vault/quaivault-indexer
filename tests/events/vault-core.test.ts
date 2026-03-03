@@ -15,6 +15,8 @@ vi.mock('../../src/services/supabase.js', () => ({
     disableModule: vi.fn().mockResolvedValue(undefined),
     addDeposit: vi.fn().mockResolvedValue(undefined),
     revokeConfirmation: vi.fn().mockResolvedValue(undefined),
+    getTokenByAddress: vi.fn().mockResolvedValue(null),
+    upsertToken: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -68,6 +70,8 @@ describe('vault-core event handlers', () => {
           to: '0xTarget',
           value: '1000',
           data: '0x',
+          expiration: '1700000000',
+          executionDelay: '300',
         },
       });
 
@@ -82,6 +86,8 @@ describe('vault-core event handlers', () => {
           status: 'pending',
           submittedBy: '0xProposer',
           submittedAtBlock: 200,
+          expiration: 1700000000,
+          executionDelay: 300,
         })
       );
     });
@@ -126,9 +132,11 @@ describe('vault-core event handlers', () => {
         '0xWallet',
         '0xTXHASH',
         'executed',
-        200,
-        '0xtx456',
-        '0xExecutor'
+        {
+          executed_at_block: 200,
+          executed_at_tx: '0xtx456',
+          executed_by: '0xExecutor',
+        }
       );
     });
   });

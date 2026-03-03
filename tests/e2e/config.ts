@@ -10,7 +10,6 @@ dotenvConfig({ path: path.resolve(process.cwd(), '.env.e2e') });
 export interface E2EConfig {
   // Blockchain
   rpcUrl: string;
-  wsUrl: string;
   chainId: number;
 
   // Test wallets
@@ -20,11 +19,11 @@ export interface E2EConfig {
   // Contract addresses
   quaiVaultFactoryAddress: string;
   quaiVaultImplementation: string;
-  dailyLimitModuleAddress?: string;
-  whitelistModuleAddress?: string;
   socialRecoveryModuleAddress?: string;
   multiSendAddress?: string;
   mockModuleAddress?: string;
+  mockErc721Address?: string;
+  mockErc1155Address?: string;
 
   // Supabase
   supabaseUrl: string;
@@ -57,21 +56,20 @@ export function loadE2EConfig(): E2EConfig {
   return {
     // Blockchain - base URL without shard path (usePathing: true handles routing)
     rpcUrl: process.env.QUAI_RPC_URL || 'https://rpc.orchard.quai.network',
-    wsUrl: process.env.QUAI_WS_URL || 'wss://rpc.orchard.quai.network',
     chainId: parseInt(process.env.QUAI_CHAIN_ID || '9000', 10),
 
     // Test wallets
     ownerPrivateKeys: ownerKeys,
     guardianPrivateKeys: guardianKeys,
 
-    // Contract addresses
-    quaiVaultFactoryAddress: process.env.QUAIVAULT_FACTORY_ADDRESS || '',
-    quaiVaultImplementation: process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS || '',
-    dailyLimitModuleAddress: process.env.DAILY_LIMIT_MODULE_ADDRESS,
-    whitelistModuleAddress: process.env.WHITELIST_MODULE_ADDRESS,
-    socialRecoveryModuleAddress: process.env.SOCIAL_RECOVERY_MODULE_ADDRESS,
-    multiSendAddress: process.env.MULTISEND_ADDRESS,
+    // Contract addresses (SHORT names matching .env.e2e)
+    quaiVaultFactoryAddress: process.env.QUAIVAULT_FACTORY || '',
+    quaiVaultImplementation: process.env.QUAIVAULT_IMPLEMENTATION || '',
+    socialRecoveryModuleAddress: process.env.SOCIAL_RECOVERY_MODULE,
+    multiSendAddress: process.env.MULTISEND,
     mockModuleAddress: process.env.MOCK_MODULE,
+    mockErc721Address: process.env.MOCK_ERC721,
+    mockErc1155Address: process.env.MOCK_ERC1155,
 
     // Supabase
     supabaseUrl: process.env.SUPABASE_URL || '',
@@ -79,7 +77,7 @@ export function loadE2EConfig(): E2EConfig {
     supabaseSchema: process.env.SUPABASE_SCHEMA || 'dev',
 
     // Health check
-    healthCheckPort: parseInt(process.env.HEALTH_CHECK_PORT || '8080', 10),
+    healthCheckPort: parseInt(process.env.HEALTH_CHECK_PORT || '8081', 10),
 
     // Timing
     indexerPollInterval: parseInt(process.env.INDEXER_POLL_INTERVAL || '15000', 10),
@@ -96,9 +94,8 @@ export function validateE2EConfig(config: E2EConfig): void {
 
   // Required fields
   if (!config.rpcUrl) errors.push('QUAI_RPC_URL is required');
-  if (!config.wsUrl) errors.push('QUAI_WS_URL is required');
-  if (!config.quaiVaultFactoryAddress) errors.push('QUAIVAULT_FACTORY_ADDRESS is required');
-  if (!config.quaiVaultImplementation) errors.push('QUAIVAULT_IMPLEMENTATION_ADDRESS is required');
+  if (!config.quaiVaultFactoryAddress) errors.push('QUAIVAULT_FACTORY is required');
+  if (!config.quaiVaultImplementation) errors.push('QUAIVAULT_IMPLEMENTATION is required');
   if (!config.supabaseUrl) errors.push('SUPABASE_URL is required');
   if (!config.supabaseServiceKey) errors.push('SUPABASE_SERVICE_KEY is required');
 
@@ -146,17 +143,17 @@ export function validateE2EConfig(config: E2EConfig): void {
  * Check which module tests can be run based on configuration
  */
 export function getAvailableModuleTests(config: E2EConfig): {
-  dailyLimit: boolean;
-  whitelist: boolean;
   socialRecovery: boolean;
   multiSend: boolean;
   mockModule: boolean;
+  mockErc721: boolean;
+  mockErc1155: boolean;
 } {
   return {
-    dailyLimit: !!config.dailyLimitModuleAddress,
-    whitelist: !!config.whitelistModuleAddress,
     socialRecovery: !!config.socialRecoveryModuleAddress,
     multiSend: !!config.multiSendAddress,
     mockModule: !!config.mockModuleAddress,
+    mockErc721: !!config.mockErc721Address,
+    mockErc1155: !!config.mockErc1155Address,
   };
 }

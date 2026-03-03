@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { quais } from 'quais';
 import type { IndexerLog } from '../../src/types/index.js';
 
 // Mock services before importing handler
 vi.mock('../../src/services/supabase.js', () => ({
   supabase: {
     addTokenTransfer: vi.fn().mockResolvedValue(undefined),
+    addTokenTransfersBatch: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -21,6 +23,8 @@ import { handleTokenTransfer } from '../../src/events/token-transfer.js';
 import { supabase } from '../../src/services/supabase.js';
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const TRANSFER_SINGLE_TOPIC = quais.id('TransferSingle(address,address,address,uint256,uint256)');
+const TRANSFER_BATCH_TOPIC = quais.id('TransferBatch(address,address,address,uint256[],uint256[])');
 
 // Pad address to 32 bytes (topic format)
 function padAddress(addr: string): string {
@@ -223,5 +227,204 @@ describe('handleTokenTransfer', () => {
         walletAddress: addr,
       })
     );
+  });
+
+  // ============================================
+  // ERC1155 TransferSingle Tests
+  // ============================================
+
+  it('handles ERC1155 TransferSingle inflow', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    // Data: uint256 id=42, uint256 value=100
+    const data = '0x'
+      + BigInt(42).toString(16).padStart(64, '0')
+      + BigInt(100).toString(16).padStart(64, '0');
+
+    const log = makeLog({
+      topics: [TRANSFER_SINGLE_TOPIC, padAddress(OPERATOR), padAddress(EXTERNAL), padAddress(VAULT_A)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    expect(supabase.addTokenTransfer).toHaveBeenCalledTimes(1);
+    expect(supabase.addTokenTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenAddress: TOKEN_ADDR,
+        walletAddress: VAULT_A,
+        fromAddress: EXTERNAL,
+        toAddress: VAULT_A,
+        value: '100',
+        tokenId: '42',
+        batchIndex: 0,
+        direction: 'inflow',
+      })
+    );
+  });
+
+  it('handles ERC1155 TransferSingle outflow', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    const data = '0x'
+      + BigInt(7).toString(16).padStart(64, '0')
+      + BigInt(50).toString(16).padStart(64, '0');
+
+    const log = makeLog({
+      topics: [TRANSFER_SINGLE_TOPIC, padAddress(OPERATOR), padAddress(VAULT_A), padAddress(EXTERNAL)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    expect(supabase.addTokenTransfer).toHaveBeenCalledTimes(1);
+    expect(supabase.addTokenTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        walletAddress: VAULT_A,
+        direction: 'outflow',
+        tokenId: '7',
+        value: '50',
+      })
+    );
+  });
+
+  it('handles ERC1155 TransferSingle vault-to-vault (records both directions)', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    const data = '0x'
+      + BigInt(1).toString(16).padStart(64, '0')
+      + BigInt(10).toString(16).padStart(64, '0');
+
+    const log = makeLog({
+      topics: [TRANSFER_SINGLE_TOPIC, padAddress(OPERATOR), padAddress(VAULT_A), padAddress(VAULT_B)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    expect(supabase.addTokenTransfer).toHaveBeenCalledTimes(2);
+    expect(supabase.addTokenTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ walletAddress: VAULT_A, direction: 'outflow' })
+    );
+    expect(supabase.addTokenTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ walletAddress: VAULT_B, direction: 'inflow' })
+    );
+  });
+
+  it('handles ERC1155 TransferSingle mint (from zero address)', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    const data = '0x'
+      + BigInt(1).toString(16).padStart(64, '0')
+      + BigInt(1000).toString(16).padStart(64, '0');
+
+    const log = makeLog({
+      topics: [TRANSFER_SINGLE_TOPIC, padAddress(OPERATOR), padAddress(ZERO_ADDR), padAddress(VAULT_A)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    expect(supabase.addTokenTransfer).toHaveBeenCalledTimes(1);
+    expect(supabase.addTokenTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromAddress: ZERO_ADDR,
+        toAddress: VAULT_A,
+        direction: 'inflow',
+        value: '1000',
+      })
+    );
+  });
+
+  // ============================================
+  // ERC1155 TransferBatch Tests
+  // ============================================
+
+  it('handles ERC1155 TransferBatch — fans out to one row per id/value pair via batch insert', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    const abiCoder = quais.AbiCoder.defaultAbiCoder();
+    const data = abiCoder.encode(
+      ['uint256[]', 'uint256[]'],
+      [[1n, 2n, 3n], [10n, 20n, 30n]]
+    );
+
+    const log = makeLog({
+      topics: [TRANSFER_BATCH_TOPIC, padAddress(OPERATOR), padAddress(EXTERNAL), padAddress(VAULT_A)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    // Uses batch insert — 1 call with 3 inflow records
+    expect(supabase.addTokenTransfersBatch).toHaveBeenCalledTimes(1);
+    const records = vi.mocked(supabase.addTokenTransfersBatch).mock.calls[0][0];
+    expect(records).toHaveLength(3);
+    expect(records[0]).toEqual(expect.objectContaining({ tokenId: '1', value: '10', batchIndex: 0, direction: 'inflow' }));
+    expect(records[1]).toEqual(expect.objectContaining({ tokenId: '2', value: '20', batchIndex: 1, direction: 'inflow' }));
+    expect(records[2]).toEqual(expect.objectContaining({ tokenId: '3', value: '30', batchIndex: 2, direction: 'inflow' }));
+  });
+
+  it('handles ERC1155 TransferBatch vault-to-vault (2x fan-out via batch insert)', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    const abiCoder = quais.AbiCoder.defaultAbiCoder();
+    const data = abiCoder.encode(
+      ['uint256[]', 'uint256[]'],
+      [[10n, 20n], [5n, 15n]]
+    );
+
+    const log = makeLog({
+      topics: [TRANSFER_BATCH_TOPIC, padAddress(OPERATOR), padAddress(VAULT_A), padAddress(VAULT_B)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    // 2 ids × 2 vaults = 4 records in a single batch insert
+    expect(supabase.addTokenTransfersBatch).toHaveBeenCalledTimes(1);
+    const records = vi.mocked(supabase.addTokenTransfersBatch).mock.calls[0][0];
+    expect(records).toHaveLength(4);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ walletAddress: VAULT_A, direction: 'outflow', tokenId: '10', batchIndex: 0 }),
+      expect.objectContaining({ walletAddress: VAULT_B, direction: 'inflow', tokenId: '10', batchIndex: 0 }),
+      expect.objectContaining({ walletAddress: VAULT_A, direction: 'outflow', tokenId: '20', batchIndex: 1 }),
+      expect.objectContaining({ walletAddress: VAULT_B, direction: 'inflow', tokenId: '20', batchIndex: 1 }),
+    ]));
+  });
+
+  // ============================================
+  // Security Boundary Tests
+  // ============================================
+
+  it('truncates ERC1155 TransferBatch exceeding MAX_BATCH_SIZE (256)', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    const abiCoder = quais.AbiCoder.defaultAbiCoder();
+    // Create 300 items — should be truncated to 256
+    const ids = Array.from({ length: 300 }, (_, i) => BigInt(i + 1));
+    const values = Array.from({ length: 300 }, (_, i) => BigInt((i + 1) * 10));
+    const data = abiCoder.encode(['uint256[]', 'uint256[]'], [ids, values]);
+
+    const log = makeLog({
+      topics: [TRANSFER_BATCH_TOPIC, padAddress(OPERATOR), padAddress(EXTERNAL), padAddress(VAULT_A)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    expect(supabase.addTokenTransfersBatch).toHaveBeenCalledTimes(1);
+    const records = vi.mocked(supabase.addTokenTransfersBatch).mock.calls[0][0];
+    expect(records).toHaveLength(256); // Truncated from 300
+  });
+
+  it('skips ERC1155 TransferBatch when neither party is tracked', async () => {
+    const OPERATOR = '0x7777777777777777777777777777777777777777';
+    const OTHER = '0x1111111111111111111111111111111111111111';
+    const abiCoder = quais.AbiCoder.defaultAbiCoder();
+    const data = abiCoder.encode(['uint256[]', 'uint256[]'], [[1n], [10n]]);
+
+    const log = makeLog({
+      topics: [TRANSFER_BATCH_TOPIC, padAddress(OPERATOR), padAddress(EXTERNAL), padAddress(OTHER)],
+      data,
+    });
+
+    await handleTokenTransfer(log, 'ERC1155', trackedWallets);
+
+    expect(supabase.addTokenTransfersBatch).not.toHaveBeenCalled();
+    expect(supabase.addTokenTransfer).not.toHaveBeenCalled();
   });
 });

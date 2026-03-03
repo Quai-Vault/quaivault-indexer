@@ -32,10 +32,10 @@ This guide covers deploying the QuaiVault Indexer on a VPS using either Docker o
 
 **Important**: Use base URLs without shard path. The indexer auto-appends `/cyprus1` for direct RPC calls, and uses `usePathing: true` for provider connections.
 
-| Network | RPC URL | WebSocket URL |
-|---------|---------|---------------|
-| Orchard Testnet | `https://rpc.orchard.quai.network` | `wss://rpc.orchard.quai.network` |
-| Mainnet | `https://rpc.quai.network` | `wss://rpc.quai.network` |
+| Network | RPC URL |
+|---------|---------|
+| Orchard Testnet | `https://rpc.orchard.quai.network` |
+| Mainnet | `https://rpc.quai.network` |
 
 ---
 
@@ -46,7 +46,6 @@ This guide covers deploying the QuaiVault Indexer on a VPS using either Docker o
 ```bash
 # Quai Network (use base URL - shard auto-appended)
 QUAI_RPC_URL=https://rpc.orchard.quai.network
-QUAI_WS_URL=wss://rpc.orchard.quai.network
 
 # Supabase
 SUPABASE_URL=https://your-project.supabase.co
@@ -54,12 +53,10 @@ SUPABASE_SERVICE_KEY=your-service-role-key
 SUPABASE_SCHEMA=testnet           # Database schema (testnet, mainnet, or public)
 
 # Contract Addresses (deploy these first)
-PROXY_FACTORY_ADDRESS=0x...
+QUAIVAULT_FACTORY_ADDRESS=0x...
 QUAIVAULT_IMPLEMENTATION_ADDRESS=0x...
 
 # Optional Module and Utility Addresses
-DAILY_LIMIT_MODULE_ADDRESS=0x...
-WHITELIST_MODULE_ADDRESS=0x...
 SOCIAL_RECOVERY_MODULE_ADDRESS=0x...
 MULTISEND_ADDRESS=0x...
 
@@ -69,10 +66,21 @@ BATCH_SIZE=1000                  # Blocks per batch during backfill
 POLL_INTERVAL=5000               # Milliseconds between polls
 CONFIRMATIONS=2                  # Block confirmations before indexing
 
+# Token Tracking (optional — comma-separated ERC20/ERC721 addresses)
+SEED_TOKEN_ADDRESSES=
+
+# CORS (comma-separated allowed origins for health endpoint)
+CORS_ALLOWED_ORIGINS=https://testnet.quaivault.org,https://quaivault.org
+
 # Health Check
 HEALTH_CHECK_ENABLED=true
-HEALTH_CHECK_PORT=3000
+HEALTH_CHECK_PORT=8080
 HEALTH_MAX_BLOCKS_BEHIND=100
+
+# Logging
+LOG_LEVEL=info
+LOG_TO_FILE=true
+NODE_ENV=production
 ```
 
 ### Environment Files
@@ -242,10 +250,10 @@ When running multiple instances, use different health check ports:
 
 ```bash
 # Testnet .env
-HEALTH_CHECK_PORT=3001
+HEALTH_CHECK_PORT=8081
 
 # Mainnet .env
-HEALTH_CHECK_PORT=3002
+HEALTH_CHECK_PORT=8082
 ```
 
 ### Database Schema Configuration
@@ -262,10 +270,10 @@ The indexer supports running multiple networks in a **single Supabase project** 
    -- (copy contents of supabase/migrations/schema.sql and run it)
 
    -- Create testnet schema
-   SELECT create_network_schema('testnet');
+   SELECT create_quaivault_schema('testnet');
 
    -- Create mainnet schema
-   SELECT create_network_schema('mainnet');
+   SELECT create_quaivault_schema('mainnet');
    ```
 
 3. **Expose schemas to the Supabase API** (required):
@@ -288,7 +296,7 @@ The indexer supports running multiple networks in a **single Supabase project** 
    SUPABASE_SCHEMA=mainnet
    ```
 
-**Note:** The `create_network_schema()` function automatically:
+**Note:** The `create_quaivault_schema()` function automatically:
 - Creates all tables, indexes, and triggers
 - Sets up Row Level Security policies
 - Grants permissions to service_role, authenticated, and anon roles
@@ -365,8 +373,7 @@ SELECT 'mainnet' as network, COUNT(*) FROM mainnet.wallets;
     "currentBlock": 1234567,
     "lastIndexedBlock": 1234565,
     "blocksBehind": 0,
-    "isSyncing": false,
-    "trackedWallets": 42
+    "isSyncing": false
   }
 }
 ```
@@ -375,10 +382,10 @@ SELECT 'mainnet' as network, COUNT(*) FROM mainnet.wallets;
 
 ```bash
 # Simple uptime check
-curl -f http://localhost:3000/health || echo "Unhealthy"
+curl -f http://localhost:8080/health || echo "Unhealthy"
 
 # With jq for status extraction
-curl -s http://localhost:3000/health | jq -r '.status'
+curl -s http://localhost:8080/health | jq -r '.status'
 ```
 
 ### Prometheus Integration (Optional)
@@ -389,7 +396,7 @@ Add to your Prometheus config:
 scrape_configs:
   - job_name: 'quai-indexer'
     static_configs:
-      - targets: ['localhost:3000']
+      - targets: ['localhost:8080']
     metrics_path: /health
 ```
 
@@ -473,7 +480,7 @@ NODE_OPTIONS="--max-old-space-size=2048" node dist/index.js
 
 ```bash
 # Check if port is in use
-sudo lsof -i :3000
+sudo lsof -i :8080
 
 # Check Node.js processes
 ps aux | grep node

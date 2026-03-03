@@ -27,7 +27,6 @@ export interface HealthStatus {
     lastIndexedBlock: number | null;
     blocksBehind: number | null;
     isSyncing: boolean;
-    trackedWallets: number;
   };
 }
 
@@ -38,7 +37,6 @@ interface CheckResult {
 
 class HealthService {
   private server: Server | null = null;
-  private trackedWalletsCount = 0;
   private isIndexerRunning = false;
   private rpcCircuitBreakerOpen = false;
 
@@ -49,10 +47,6 @@ class HealthService {
     config.healthRateLimit.maxIPs,
     config.healthRateLimit.cleanupIntervalMs
   );
-
-  setTrackedWalletsCount(count: number): void {
-    this.trackedWalletsCount = count;
-  }
 
   setIndexerRunning(running: boolean): void {
     this.isIndexerRunning = running;
@@ -70,15 +64,28 @@ class HealthService {
   }
 
   /**
-   * Extract client IP from request, handling proxies
+   * Validate an IP string is a plausible IPv4 or IPv6 address.
+   */
+  private isValidIp(ip: string): boolean {
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return true;
+    if (ip.includes(':') && /^[0-9a-fA-F:]+$/.test(ip)) return true;
+    return false;
+  }
+
+  /**
+   * Extract client IP from request, handling proxies.
+   * Invalid/spoofed IPs collapse to 'unknown' to share a single rate-limit bucket.
    */
   private getClientIp(req: IncomingMessage): string {
+    let raw: string;
     const forwarded = req.headers['x-forwarded-for'];
     if (forwarded) {
       const ips = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-      return ips.split(',')[0].trim();
+      raw = ips.split(',')[0].trim();
+    } else {
+      raw = req.socket.remoteAddress || 'unknown';
     }
-    return req.socket.remoteAddress || 'unknown';
+    return this.isValidIp(raw) ? raw : 'unknown';
   }
 
   /**
@@ -130,17 +137,17 @@ class HealthService {
         'X-Request-Id': requestId,
       };
 
-      // Handle CORS preflight requests (don't rate limit these)
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204, headersWithTracing);
-        res.end();
-        return;
-      }
-
-      // Apply rate limiting
+      // Apply rate limiting (including CORS preflight to prevent flooding)
       if (!this.rateLimiter.check(clientIp)) {
         logger.warn({ requestId, ip: clientIp, url: req.url }, 'Rate limit exceeded');
         this.sendRateLimitResponse(res, headersWithTracing);
+        return;
+      }
+
+      // Handle CORS preflight requests
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, headersWithTracing);
+        res.end();
         return;
       }
 
@@ -188,9 +195,10 @@ class HealthService {
   private async handleHealthCheck(res: ServerResponse, headers: Record<string, string>, requestId: string): Promise<void> {
     const health = await this.getHealthStatus();
     const statusCode = health.status === 'healthy' ? 200 : 503;
+    const body = JSON.stringify({ ...health, requestId }, null, 2);
 
-    res.writeHead(statusCode, headers);
-    res.end(JSON.stringify({ ...health, requestId }, null, 2));
+    res.writeHead(statusCode, { ...headers, 'Content-Length': Buffer.byteLength(body).toString() });
+    res.end(body);
   }
 
   private async handleReadinessCheck(res: ServerResponse, headers: Record<string, string>, requestId: string): Promise<void> {
@@ -201,13 +209,17 @@ class HealthService {
       health.checks.indexer.status === 'pass';
 
     const statusCode = isReady ? 200 : 503;
-    res.writeHead(statusCode, headers);
-    res.end(JSON.stringify({ ready: isReady, requestId }));
+    const body = JSON.stringify({ ready: isReady, requestId });
+
+    res.writeHead(statusCode, { ...headers, 'Content-Length': Buffer.byteLength(body).toString() });
+    res.end(body);
   }
 
   private handleLivenessCheck(res: ServerResponse, headers: Record<string, string>, requestId: string): void {
-    res.writeHead(200, headers);
-    res.end(JSON.stringify({ alive: true, requestId }));
+    const body = JSON.stringify({ alive: true, requestId });
+
+    res.writeHead(200, { ...headers, 'Content-Length': Buffer.byteLength(body).toString() });
+    res.end(body);
   }
 
   private async getHealthStatus(): Promise<HealthStatus> {
@@ -260,7 +272,6 @@ class HealthService {
         lastIndexedBlock,
         blocksBehind,
         isSyncing,
-        trackedWallets: this.trackedWalletsCount,
       },
     };
   }

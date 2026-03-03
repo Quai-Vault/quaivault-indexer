@@ -43,14 +43,16 @@ export interface WalletOwner {
 
 export type TransactionType =
   | 'transfer'           // Native QUAI transfer (no data or empty data)
-  | 'module_config'      // Module configuration (setDailyLimit, addToWhitelist, etc.)
+  | 'module_config'      // Module configuration
   | 'wallet_admin'       // Wallet admin (addOwner, removeOwner, changeThreshold, enableModule, disableModule)
+  | 'message_signing'    // EIP-1271 message signing (signMessage, unsignMessage)
   | 'recovery_setup'     // Social recovery setup
   | 'module_execution'   // execTransactionFromModule (Zodiac IAvatar)
   | 'batched_call'       // MultiSend batched transactions
   | 'external_call'      // Generic contract call
   | 'erc20_transfer'     // ERC20 token operations (transfer, approve, transferFrom)
   | 'erc721_transfer'    // ERC721 token operations (safeTransferFrom)
+  | 'erc1155_transfer'   // ERC1155 token operations (safeTransferFrom, safeBatchTransferFrom)
   | 'unknown';           // Could not be decoded
 
 // ============================================
@@ -75,16 +77,22 @@ export interface MultisigTransaction {
   data: string;
   transactionType: TransactionType;
   decodedParams?: DecodedParams;
-  status: 'pending' | 'executed' | 'cancelled';
+  status: 'pending' | 'executed' | 'cancelled' | 'expired' | 'failed';
   confirmationCount: number;
   submittedBy: string;
   submittedAtBlock: number;
   submittedAtTx: string;
   executedAtBlock?: number;
   executedAtTx?: string;
-  executedBy?: string; // Address of the owner who executed the transaction
+  executedBy?: string;
   cancelledAtBlock?: number;
   cancelledAtTx?: string;
+  expiration?: number;        // uint48, 0 = no expiry
+  executionDelay?: number;    // uint32, 0 = immediate
+  approvedAt?: number;        // uint48, set by ThresholdReached
+  executableAfter?: number;   // approvedAt + executionDelay
+  isExpired?: boolean;        // set by TransactionExpired handler
+  failedReturnData?: string;  // revert data from TransactionFailed
 }
 
 export interface Confirmation {
@@ -167,48 +175,6 @@ export interface SocialRecoveryApproval {
 }
 
 // ============================================
-// Daily Limit Module Types
-// ============================================
-
-export interface DailyLimitState {
-  walletAddress: string;
-  dailyLimit: string;
-  spentToday: string;
-  lastResetDay: string;
-}
-
-// ============================================
-// Module Transaction Types
-// ============================================
-
-export interface ModuleTransaction {
-  walletAddress: string;
-  moduleType: 'daily_limit' | 'whitelist' | 'social_recovery';
-  moduleAddress: string;
-  toAddress: string;
-  value: string;
-  remainingLimit?: string; // Only for daily limit
-  operationType?: OperationType; // For Zodiac IAvatar module executions
-  executedAtBlock: number;
-  executedAtTx: string;
-}
-
-// ============================================
-// Whitelist Module Types
-// ============================================
-
-export interface WhitelistEntry {
-  walletAddress: string;
-  whitelistedAddress: string;
-  limit: string;
-  addedAtBlock: number;
-  addedAtTx: string;
-  removedAtBlock?: number;
-  removedAtTx?: string;
-  isActive: boolean;
-}
-
-// ============================================
 // Module Execution Types (Zodiac IAvatar)
 // ============================================
 
@@ -222,13 +188,14 @@ export interface ModuleExecution {
   dataHash?: string;
   executedAtBlock: number;
   executedAtTx: string;
+  logIndex?: number;
 }
 
 // ============================================
-// Token Types (ERC20 / ERC721)
+// Token Types (ERC20 / ERC721 / ERC1155)
 // ============================================
 
-export type TokenStandard = 'ERC20' | 'ERC721';
+export type TokenStandard = 'ERC20' | 'ERC721' | 'ERC1155';
 
 export interface TokenInfo {
   address: string;
@@ -245,8 +212,24 @@ export interface TokenTransfer {
   toAddress: string;
   value: string;
   tokenId?: string;
+  batchIndex?: number;  // 0 for single transfers, array index for ERC1155 TransferBatch fan-out
   direction: 'inflow' | 'outflow';
   blockNumber: number;
   transactionHash: string;
   logIndex: number;
+}
+
+// ============================================
+// Message Signing Types (EIP-1271)
+// ============================================
+
+export interface SignedMessage {
+  walletAddress: string;
+  msgHash: string;
+  data?: string;
+  signedAtBlock: number;
+  signedAtTx: string;
+  unsignedAtBlock?: number;
+  unsignedAtTx?: string;
+  isActive: boolean;
 }

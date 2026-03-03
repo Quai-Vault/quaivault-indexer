@@ -10,12 +10,6 @@ export function getModuleContractAddresses(): string[] {
   if (config.contracts.socialRecoveryModule) {
     addresses.push(config.contracts.socialRecoveryModule);
   }
-  if (config.contracts.dailyLimitModule) {
-    addresses.push(config.contracts.dailyLimitModule);
-  }
-  if (config.contracts.whitelistModule) {
-    addresses.push(config.contracts.whitelistModule);
-  }
 
   return addresses;
 }

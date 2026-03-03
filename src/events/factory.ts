@@ -6,7 +6,7 @@ import type { DecodedEvent } from '../types/index.js';
 import { supabase } from '../services/supabase.js';
 import { quai } from '../services/quai.js';
 import { logger } from '../utils/logger.js';
-import { validateEventArgs } from './helpers.js';
+import { validateEventArgs, safeParseInt, safeParseHex } from './helpers.js';
 
 // ABI decoding constants
 const ABI_CONSTANTS = {
@@ -20,6 +20,23 @@ const ABI_CONSTANTS = {
   ADDRESS_HEX_LENGTH: 40,          // 20 bytes = 40 hex chars
 };
 
+/** Query minExecutionDelay from a wallet contract and persist if non-zero. */
+async function queryAndStoreDelay(wallet: string): Promise<void> {
+  try {
+    const delayHex = await quai.callContract(wallet, 'minExecutionDelay()');
+    const delay = safeParseHex(delayHex, 'minExecutionDelay');
+    if (delay > 0) {
+      await supabase.updateWalletDelay(wallet, delay);
+    }
+  } catch (err) {
+    logger.debug({ err, wallet }, 'Could not query minExecutionDelay (may be 0)');
+  }
+}
+
+// AUDIT: Wallet addresses from WalletCreated/WalletRegistered events are validated
+// via validateEventArgs → validateAddress() before any DB writes. The indexer trusts
+// on-chain events emitted by the verified factory contract; CREATE2 address derivation
+// is not re-verified since the factory enforces this at deployment time.
 export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
   const { wallet, owners, threshold } = validateEventArgs<{
     wallet: string;
@@ -29,7 +46,7 @@ export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
 
   await supabase.upsertWallet({
     address: wallet,
-    threshold: parseInt(threshold),
+    threshold: safeParseInt(threshold, 'WalletCreated.threshold'),
     ownerCount: owners.length,
     createdAtBlock: event.blockNumber,
     createdAtTx: event.transactionHash,
@@ -44,6 +61,8 @@ export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
       isActive: true,
     }))
   );
+
+  await queryAndStoreDelay(wallet);
 
   logger.info({ wallet, owners: owners.length, threshold }, 'Wallet created');
 }
@@ -61,7 +80,7 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
     ]);
 
     const ownerAddresses = decodeAddressArray(owners);
-    const thresholdValue = parseInt(threshold, 16);
+    const thresholdValue = safeParseHex(threshold, 'threshold');
 
     await supabase.upsertWallet({
       address: wallet,
@@ -80,6 +99,8 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
         isActive: true,
       }))
     );
+
+    await queryAndStoreDelay(wallet);
 
     logger.info({ wallet, owners: ownerAddresses.length, threshold: thresholdValue }, 'Wallet registered');
   } catch (err) {
@@ -114,9 +135,9 @@ function decodeAddressArray(hexData: string): string[] {
   const data = hexData.slice(ABI_CONSTANTS.HEX_PREFIX_LENGTH);
 
   const lengthHex = data.slice(ABI_CONSTANTS.LENGTH_START, ABI_CONSTANTS.LENGTH_END);
-  const length = parseInt(lengthHex, 16);
+  const length = safeParseHex('0x' + lengthHex, 'arrayLength');
 
-  if (isNaN(length) || length < 0 || length > ABI_CONSTANTS.MAX_ADDRESS_ARRAY_LENGTH) {
+  if (length > ABI_CONSTANTS.MAX_ADDRESS_ARRAY_LENGTH) {
     throw new Error(`Invalid ABI-encoded address array: unreasonable length ${length}`);
   }
 

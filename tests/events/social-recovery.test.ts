@@ -39,6 +39,7 @@ import {
 } from '../../src/events/social-recovery.js';
 import { supabase } from '../../src/services/supabase.js';
 import { quai } from '../../src/services/quai.js';
+import { logger } from '../../src/utils/logger.js';
 
 function makeEvent(overrides: Partial<DecodedEvent> = {}): DecodedEvent {
   return {
@@ -58,6 +59,52 @@ describe('social-recovery event handlers', () => {
   });
 
   describe('handleRecoverySetup', () => {
+    it('rejects event when guardians exceed MAX_GUARDIANS (20)', async () => {
+      const tooManyGuardians = Array.from({ length: 21 }, (_, i) =>
+        `0xGuardian${String(i).padStart(2, '0')}`
+      );
+
+      const event = makeEvent({
+        args: {
+          wallet: '0xWallet',
+          guardians: tooManyGuardians,
+          threshold: '2',
+          recoveryPeriod: '86400',
+        },
+      });
+
+      await handleRecoverySetup(event);
+
+      expect(supabase.upsertRecoveryConfig).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ guardianCount: 21, max: 20 }),
+        expect.stringContaining('MAX_GUARDIANS')
+      );
+    });
+
+    it('accepts event with exactly MAX_GUARDIANS (20)', async () => {
+      const maxGuardians = Array.from({ length: 20 }, (_, i) =>
+        `0xGuardian${String(i).padStart(2, '0')}`
+      );
+
+      const event = makeEvent({
+        args: {
+          wallet: '0xWallet',
+          guardians: maxGuardians,
+          threshold: '2',
+          recoveryPeriod: '86400',
+        },
+      });
+
+      await handleRecoverySetup(event);
+
+      expect(supabase.upsertRecoveryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          guardians: maxGuardians,
+        })
+      );
+    });
+
     it('upserts recovery config with parsed values', async () => {
       const event = makeEvent({
         args: {
@@ -129,6 +176,32 @@ describe('social-recovery event handlers', () => {
           status: 'pending',
           // executionTime will be Date.now()/1000 + 3600, just check it was called
         })
+      );
+    });
+
+    it('skips event when executionTime exceeds safe integer range', async () => {
+      vi.mocked(supabase.getRecoveryConfig).mockResolvedValueOnce({
+        recoveryPeriod: Number.MAX_SAFE_INTEGER,
+        threshold: 2,
+      });
+
+      const event = makeEvent({
+        name: 'RecoveryInitiated',
+        args: {
+          wallet: '0xWallet',
+          recoveryHash: '0xHash',
+          newOwners: ['0xNewOwner1'],
+          newThreshold: '1',
+          initiator: '0xGuardian1',
+        },
+      });
+
+      await handleRecoveryInitiated(event);
+
+      expect(supabase.upsertRecovery).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ wallet: '0xWallet' }),
+        expect.stringContaining('safe integer')
       );
     });
 

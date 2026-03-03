@@ -26,7 +26,6 @@ export const config = {
   // Quai Network - base URL without shard path (usePathing: true handles routing)
   quai: {
     rpcUrl: process.env.QUAI_RPC_URL || 'https://rpc.quai.network',
-    wsUrl: process.env.QUAI_WS_URL || 'wss://rpc.quai.network',
     chainId: 9,
   },
 
@@ -42,8 +41,6 @@ export const config = {
   contracts: {
     quaiVaultFactory: process.env.QUAIVAULT_FACTORY_ADDRESS!,
     quaiVaultImplementation: process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS!,
-    dailyLimitModule: process.env.DAILY_LIMIT_MODULE_ADDRESS,
-    whitelistModule: process.env.WHITELIST_MODULE_ADDRESS,
     socialRecoveryModule: process.env.SOCIAL_RECOVERY_MODULE_ADDRESS,
     multiSend: process.env.MULTISEND_ADDRESS,
   },
@@ -161,8 +158,6 @@ function validateConfig(): void {
 
   // Validate optional contract addresses if provided
   const optionalContracts: Array<[string, string | undefined]> = [
-    ['DAILY_LIMIT_MODULE_ADDRESS', process.env.DAILY_LIMIT_MODULE_ADDRESS],
-    ['WHITELIST_MODULE_ADDRESS', process.env.WHITELIST_MODULE_ADDRESS],
     ['SOCIAL_RECOVERY_MODULE_ADDRESS', process.env.SOCIAL_RECOVERY_MODULE_ADDRESS],
     ['MULTISEND_ADDRESS', process.env.MULTISEND_ADDRESS],
   ];

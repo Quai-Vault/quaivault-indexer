@@ -3,6 +3,7 @@ import { quai } from './services/quai.js';
 import { supabase } from './services/supabase.js';
 import { processBlockRange } from './services/block-processor.js';
 import { logger } from './utils/logger.js';
+import { runBackfillLoop } from './utils/backfill-loop.js';
 import type { TokenStandard } from './types/index.js';
 
 /**
@@ -58,44 +59,35 @@ async function backfill(): Promise<void> {
   tokens.forEach((t) => trackedTokens.set(t.address.toLowerCase(), t.standard));
   logger.info({ count: trackedTokens.size }, 'Loaded tracked tokens');
 
+  // Persistent cache of addresses confirmed not to be tokens (avoids redundant RPC probes)
+  const notTokenCache: Set<string> = new Set();
+
   await supabase.setIsSyncing(true);
 
-  const batchSize = config.indexer.batchSize;
-
   try {
-    for (let start = fromBlock; start <= toBlock; start += batchSize) {
-      const end = Math.min(start + batchSize - 1, toBlock);
-
-      try {
+    await runBackfillLoop({
+      fromBlock,
+      toBlock,
+      batchSize: config.indexer.batchSize,
+      processBatch: async (start, end) => {
         await processBlockRange(start, end, {
           trackedWallets,
           trackedTokens,
+          notTokenCache,
           onWalletDiscovered: (walletAddress) => {
             trackedWallets.add(walletAddress.toLowerCase());
             logger.info({ wallet: walletAddress }, 'Discovered new wallet');
           },
         });
-
         await supabase.updateIndexerState(end);
-
-        const totalBlocks = toBlock - fromBlock;
-        const progress = totalBlocks > 0
-          ? (((end - fromBlock) / totalBlocks) * 100).toFixed(1)
-          : '100.0';
+      },
+      onProgress: (start, end, pct) => {
         logger.info(
-          {
-            start,
-            end,
-            progress: `${progress}%`,
-            wallets: trackedWallets.size,
-          },
+          { start, end, progress: `${pct}%`, wallets: trackedWallets.size },
           'Backfill progress'
         );
-      } catch (err) {
-        logger.error({ err, start, end }, 'Backfill batch failed');
-        throw err;
-      }
-    }
+      },
+    });
   } finally {
     await supabase.setIsSyncing(false);
   }

@@ -9,6 +9,8 @@ import { logger } from './utils/logger.js';
 import { getModuleContractAddresses } from './utils/modules.js';
 import { withRetry, RetryTracker } from './utils/retry.js';
 import { CircuitBreaker } from './utils/circuit-breaker.js';
+import { runBackfillLoop } from './utils/backfill-loop.js';
+import { withTimeout } from './utils/timeout.js';
 import type { TokenStandard } from './types/index.js';
 
 export class Indexer {
@@ -17,6 +19,8 @@ export class Indexer {
   private trackedWallets: Set<string> = new Set();
   // Map of lowercase token addresses to their standard (ERC20/ERC721)
   private trackedTokens: Map<string, TokenStandard> = new Map();
+  // Addresses confirmed not to be tokens — persists across batches to avoid redundant RPC probes
+  private notTokenCache: Set<string> = new Set();
   // Retry tracker for poll loop resilience
   private pollRetryTracker = new RetryTracker();
   // Circuit breaker for RPC failures
@@ -29,6 +33,13 @@ export class Indexer {
   private currentWork: Promise<{ caughtUp: boolean }> | null = null;
   // Last indexed block hash for reorg detection (persisted in indexer_state)
   private lastBlockHash: string | null = null;
+  // Token refresh throttle — refresh from DB at most once per interval
+  private lastTokenRefresh = 0;
+  private readonly TOKEN_REFRESH_INTERVAL = 60_000;
+  // Wallet backfill concurrency limiter and tracking for graceful shutdown
+  private activeWalletBackfills = 0;
+  private readonly MAX_CONCURRENT_WALLET_BACKFILLS = 3;
+  private walletBackfillPromises: Set<Promise<void>> = new Set();
 
   async start(): Promise<void> {
     logger.info('Starting indexer...');
@@ -43,9 +54,6 @@ export class Indexer {
     const wallets = await supabase.getAllWalletAddresses();
     wallets.forEach((w) => this.trackedWallets.add(w.toLowerCase()));
     logger.info({ count: this.trackedWallets.size }, 'Loaded tracked wallets');
-
-    // Update health service with wallet count
-    health.setTrackedWalletsCount(this.trackedWallets.size);
 
     // Seed known tokens from config (resolve metadata via RPC)
     await this.seedTokens();
@@ -113,8 +121,13 @@ export class Indexer {
       }
     }
 
+    // Wait for background wallet backfills to finish (with timeout)
+    if (this.walletBackfillPromises.size > 0) {
+      logger.info({ count: this.walletBackfillPromises.size }, 'Waiting for wallet backfills to complete...');
+      await Promise.allSettled(this.walletBackfillPromises);
+    }
+
     await health.stop();
-    await quai.unsubscribe();
     logger.info('Indexer stopped');
   }
 
@@ -123,29 +136,23 @@ export class Indexer {
     await supabase.setIsSyncing(true);
 
     try {
-      const batchSize = config.indexer.batchSize;
-
-      for (let start = fromBlock; start <= toBlock; start += batchSize) {
-        const end = Math.min(start + batchSize - 1, toBlock);
-
-        // Use retry with backoff for each batch
-        await withRetry(
-          async () => {
-            await this.indexBlockRange(start, end);
-            await supabase.updateIndexerState(end);
-          },
-          { operation: `backfill-batch-${start}-${end}` }
-        );
-
-        const totalBlocks = toBlock - fromBlock;
-        const progress = totalBlocks > 0
-          ? (((end - fromBlock) / totalBlocks) * 100).toFixed(1)
-          : '100.0';
-        logger.info(
-          { start, end, progress: `${progress}%` },
-          'Backfill progress'
-        );
-      }
+      await runBackfillLoop({
+        fromBlock,
+        toBlock,
+        batchSize: config.indexer.batchSize,
+        processBatch: async (start, end) => {
+          await withRetry(
+            async () => {
+              await this.indexBlockRange(start, end);
+              await supabase.updateIndexerState(end);
+            },
+            { operation: `backfill-batch-${start}-${end}` }
+          );
+        },
+        onProgress: (start, end, pct) => {
+          logger.info({ start, end, progress: `${pct}%` }, 'Backfill progress');
+        },
+      });
     } finally {
       await supabase.setIsSyncing(false);
     }
@@ -156,10 +163,11 @@ export class Indexer {
   private async indexBlockRange(
     fromBlock: number,
     toBlock: number
-  ): Promise<void> {
-    await processBlockRange(fromBlock, toBlock, {
+  ): Promise<{ tokensDiscovered: boolean }> {
+    return processBlockRange(fromBlock, toBlock, {
       trackedWallets: this.trackedWallets,
       trackedTokens: this.trackedTokens,
+      notTokenCache: this.notTokenCache,
       onWalletDiscovered: (walletAddress, event) => {
         const walletLower = walletAddress.toLowerCase();
         const isNew = !this.trackedWallets.has(walletLower);
@@ -172,7 +180,6 @@ export class Indexer {
         }
 
         this.trackedWallets.add(walletLower);
-        health.setTrackedWalletsCount(this.trackedWallets.size);
         logger.info({ wallet: walletAddress, block: event.blockNumber }, 'Discovered new wallet');
 
         // WalletRegistered signals a pre-existing wallet being added to the factory.
@@ -181,11 +188,24 @@ export class Indexer {
         if (event.name === 'WalletRegistered' && isNew) {
           const historyEnd = event.blockNumber - 1;
           if (historyEnd >= config.indexer.startBlock) {
-            // Async backfill with retry — runs in background, errors are logged
-            withRetry(
-              () => this.backfillWalletHistory(walletLower, config.indexer.startBlock, historyEnd),
-              { operation: `backfillWalletHistory(${walletLower})` }
-            ).catch((err) => logger.error({ err, wallet: walletLower }, 'Wallet history backfill failed after retries'));
+            if (this.activeWalletBackfills >= this.MAX_CONCURRENT_WALLET_BACKFILLS) {
+              logger.warn(
+                { wallet: walletLower, active: this.activeWalletBackfills },
+                'Wallet backfill concurrency limit reached, deferring'
+              );
+            } else {
+              this.activeWalletBackfills++;
+              const backfillPromise = withRetry(
+                () => this.backfillWalletHistory(walletLower, config.indexer.startBlock, historyEnd),
+                { operation: `backfillWalletHistory(${walletLower})` }
+              )
+                .catch((err) => logger.error({ err, wallet: walletLower }, 'Wallet history backfill failed after retries'))
+                .finally(() => {
+                  this.activeWalletBackfills--;
+                  this.walletBackfillPromises.delete(backfillPromise);
+                });
+              this.walletBackfillPromises.add(backfillPromise);
+            }
           }
         }
       },
@@ -237,8 +257,11 @@ export class Indexer {
   }
 
   private async pollOnce(): Promise<{ caughtUp: boolean }> {
-    // Refresh tracked tokens every poll cycle (lightweight, few rows)
-    await this.refreshTrackedTokens();
+    // Throttled token refresh — only hit DB if interval elapsed
+    if (Date.now() - this.lastTokenRefresh > this.TOKEN_REFRESH_INTERVAL) {
+      await this.refreshTrackedTokens();
+      this.lastTokenRefresh = Date.now();
+    }
 
     const state = await supabase.getIndexerState();
     const currentBlock = await quai.getBlockNumber();
@@ -298,12 +321,14 @@ export class Indexer {
         'Large gap detected, triggering backfill'
       );
 
-      // Reload tracked wallets using atomic swap pattern
-      // Build new set first, then replace to avoid race condition
+      // Reload tracked wallets: merge DB state with in-memory discoveries
+      // to avoid losing wallets discovered during the async DB fetch
       const wallets = await supabase.getAllWalletAddresses();
       const newSet = new Set(wallets.map((w) => w.toLowerCase()));
-      this.trackedWallets = newSet;  // Atomic swap
-      health.setTrackedWalletsCount(this.trackedWallets.size);
+      for (const w of this.trackedWallets) {
+        newSet.add(w);
+      }
+      this.trackedWallets = newSet;
 
       await this.backfill(startBlock, safeBlock);
     } else {
@@ -311,7 +336,14 @@ export class Indexer {
         { startBlock, safeBlock, blocksToIndex },
         'Indexing block range'
       );
-      await this.indexBlockRange(startBlock, safeBlock);
+      const result = await this.indexBlockRange(startBlock, safeBlock);
+
+      // Force-refresh tokens from DB when new tokens were discovered,
+      // so the next poll cycle includes them immediately
+      if (result.tokensDiscovered) {
+        await this.refreshTrackedTokens();
+        this.lastTokenRefresh = Date.now();
+      }
 
       // Persist block hash alongside state for reorg detection across restarts
       const lastBlock = await quai.getBlock(safeBlock);
@@ -339,20 +371,19 @@ export class Indexer {
     const batchSize = config.indexer.batchSize;
     for (let start = fromBlock; start <= toBlock; start += batchSize) {
       const end = Math.min(start + batchSize - 1, toBlock);
-      const logs = await quai.getLogs(
-        walletAddress,
-        [getAllEventTopics()],
-        start,
-        end
+      const logs = await withTimeout(
+        quai.getLogs(walletAddress, [getAllEventTopics()], start, end),
+        config.rpcTimeout.callTimeoutMs,
+        `walletBackfill(${walletAddress}, ${start}-${end})`
       );
 
-      const sorted = logs.slice().sort((a, b) =>
+      logs.sort((a, b) =>
         a.blockNumber !== b.blockNumber
           ? a.blockNumber - b.blockNumber
           : a.index - b.index
       );
 
-      for (const log of sorted) {
+      for (const log of logs) {
         const event = decodeEvent(log);
         if (event) {
           await handleEvent(event);

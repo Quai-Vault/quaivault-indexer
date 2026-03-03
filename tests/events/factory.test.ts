@@ -6,6 +6,7 @@ vi.mock('../../src/services/supabase.js', () => ({
   supabase: {
     upsertWallet: vi.fn().mockResolvedValue(undefined),
     addOwnersBatch: vi.fn().mockResolvedValue(undefined),
+    updateWalletDelay: vi.fn().mockResolvedValue(undefined),
   },
 }));
 

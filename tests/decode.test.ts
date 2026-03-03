@@ -1,4 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import { quais } from 'quais';
+import {
+  getERC1155TransferTopics,
+  decodeCalldata,
+  getTransactionDescription,
+  EVENT_SIGNATURES,
+} from '../src/services/decoder.js';
 
 /**
  * Helper to decode address array from ABI-encoded response
@@ -146,5 +153,152 @@ describe('decodeAddressArray', () => {
       '000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; // only 1 address
 
     expect(() => decodeAddressArray(encoded)).toThrow('expected');
+  });
+});
+
+describe('ERC1155 decoder support', () => {
+  it('getERC1155TransferTopics returns TransferSingle and TransferBatch hashes', () => {
+    const topics = getERC1155TransferTopics();
+    expect(topics).toHaveLength(2);
+    expect(topics[0]).toBe(EVENT_SIGNATURES.TransferSingle);
+    expect(topics[1]).toBe(EVENT_SIGNATURES.TransferBatch);
+    // Verify they are valid keccak256 hashes (66 chars: 0x + 64 hex)
+    for (const t of topics) {
+      expect(t).toMatch(/^0x[0-9a-f]{64}$/);
+    }
+  });
+
+  it('EVENT_SIGNATURES.TransferSingle matches expected keccak hash', () => {
+    const expected = quais.id('TransferSingle(address,address,address,uint256,uint256)');
+    expect(EVENT_SIGNATURES.TransferSingle).toBe(expected);
+  });
+
+  it('EVENT_SIGNATURES.TransferBatch matches expected keccak hash', () => {
+    const expected = quais.id('TransferBatch(address,address,address,uint256[],uint256[])');
+    expect(EVENT_SIGNATURES.TransferBatch).toBe(expected);
+  });
+
+  it('decodeCalldata identifies ERC1155 safeTransferFrom as erc1155_transfer', () => {
+    // Encode: safeTransferFrom(address,address,uint256,uint256,bytes)
+    const iface = new quais.Interface([
+      'function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)',
+    ]);
+    const calldata = iface.encodeFunctionData('safeTransferFrom', [
+      '0x1234567890abcdef1234567890abcdef12345678',
+      '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+      42n,
+      100n,
+      '0x',
+    ]);
+
+    const result = decodeCalldata(
+      '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+      calldata,
+      '0'
+    );
+    expect(result.transactionType).toBe('erc1155_transfer');
+  });
+
+  it('decodeCalldata identifies safeBatchTransferFrom as erc1155_transfer', () => {
+    const iface = new quais.Interface([
+      'function safeBatchTransferFrom(address from, address to, uint256[] ids, uint256[] amounts, bytes data)',
+    ]);
+    const calldata = iface.encodeFunctionData('safeBatchTransferFrom', [
+      '0x1234567890abcdef1234567890abcdef12345678',
+      '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+      [1n, 2n, 3n],
+      [10n, 20n, 30n],
+      '0x',
+    ]);
+
+    const result = decodeCalldata(
+      '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+      calldata,
+      '0'
+    );
+    expect(result.transactionType).toBe('erc1155_transfer');
+  });
+});
+
+describe('ERC20/ERC721 shared selector disambiguation', () => {
+  const FROM = '0x1234567890abcdef1234567890abcdef12345678';
+  const TO = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+  const TOKEN_CONTRACT = '0x003f87efd6b0ced7aa0549662b1559b3fe861fde';
+
+  function encodeTransferFrom(): string {
+    const iface = new quais.Interface([
+      'function transferFrom(address from, address to, uint256 amount)',
+    ]);
+    return iface.encodeFunctionData('transferFrom', [FROM, TO, 42n]);
+  }
+
+  function encodeApprove(): string {
+    const iface = new quais.Interface([
+      'function approve(address spender, uint256 amount)',
+    ]);
+    return iface.encodeFunctionData('approve', [TO, 1000n]);
+  }
+
+  it('transferFrom defaults to erc20_transfer without token standard hint', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeTransferFrom(), '0');
+    expect(result.transactionType).toBe('erc20_transfer');
+    expect(result.decodedParams?.function).toBe('transferFrom');
+  });
+
+  it('transferFrom reclassifies to erc721_transfer when tokenStandard is ERC721', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeTransferFrom(), '0', 'ERC721');
+    expect(result.transactionType).toBe('erc721_transfer');
+    expect(result.decodedParams?.function).toBe('transferFrom');
+  });
+
+  it('transferFrom stays erc20_transfer when tokenStandard is ERC20', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeTransferFrom(), '0', 'ERC20');
+    expect(result.transactionType).toBe('erc20_transfer');
+  });
+
+  it('approve defaults to erc20_transfer without token standard hint', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeApprove(), '0');
+    expect(result.transactionType).toBe('erc20_transfer');
+  });
+
+  it('approve reclassifies to erc721_transfer when tokenStandard is ERC721', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeApprove(), '0', 'ERC721');
+    expect(result.transactionType).toBe('erc721_transfer');
+    expect(result.decodedParams?.function).toBe('approve');
+  });
+
+  it('description says ERC721 transferFrom with token # for ERC721', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeTransferFrom(), '0', 'ERC721');
+    const desc = getTransactionDescription(result);
+    expect(desc).toContain('ERC721 transferFrom');
+    expect(desc).toContain('token #42');
+  });
+
+  it('description says ERC20 transferFrom with amount for ERC20', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeTransferFrom(), '0');
+    const desc = getTransactionDescription(result);
+    expect(desc).toContain('ERC20 transferFrom');
+    expect(desc).toContain('42');
+  });
+
+  it('description says ERC721 approve with token # for ERC721', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeApprove(), '0', 'ERC721');
+    const desc = getTransactionDescription(result);
+    expect(desc).toContain('ERC721 approve');
+    expect(desc).toContain('token #1000');
+  });
+
+  it('ERC1155 token standard does not affect transferFrom classification', () => {
+    const result = decodeCalldata(TOKEN_CONTRACT, encodeTransferFrom(), '0', 'ERC1155');
+    expect(result.transactionType).toBe('erc20_transfer');
+  });
+
+  it('safeTransferFrom (3-arg) stays erc721_transfer regardless of hint', () => {
+    const iface = new quais.Interface([
+      'function safeTransferFrom(address from, address to, uint256 tokenId)',
+    ]);
+    const calldata = iface.encodeFunctionData('safeTransferFrom', [FROM, TO, 99n]);
+    const result = decodeCalldata(TOKEN_CONTRACT, calldata, '0');
+    expect(result.transactionType).toBe('erc721_transfer');
   });
 });

@@ -10,6 +10,8 @@ export interface RetryOptions {
   jitter?: boolean;
   /** Operation name for logging */
   operation?: string;
+  /** Predicate to check if an error is retryable (default: always retry) */
+  isRetryable?: (error: Error) => boolean;
 }
 
 /**
@@ -26,6 +28,7 @@ export async function withRetry<T>(
     maxDelayMs = config.retry.maxDelayMs,
     jitter = true,
     operation = 'operation',
+    isRetryable,
   } = options;
 
   let lastError: Error | undefined;
@@ -36,6 +39,11 @@ export async function withRetry<T>(
       return await fn();
     } catch (error) {
       lastError = error as Error;
+
+      // Fail fast on non-retryable errors (e.g., CALL_EXCEPTION from contract reverts)
+      if (isRetryable && !isRetryable(lastError)) {
+        throw lastError;
+      }
 
       if (attempt === maxAttempts) {
         break;

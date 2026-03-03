@@ -15,7 +15,6 @@ const RPC_HEALTH = {
 };
 
 class QuaiService {
-  private wsProvider: quais.WebSocketProvider | null = null;
   private provider: JsonRpcProvider;
 
   // O(1) rate limiter (replaces the old requestTimestamps[] array)
@@ -94,9 +93,13 @@ class QuaiService {
   /**
    * Execute an RPC operation with retry, tracking success/failure for health monitoring.
    */
-  private async withTrackedRetry<T>(fn: () => Promise<T>, operation: string): Promise<T> {
+  private async withTrackedRetry<T>(
+    fn: () => Promise<T>,
+    operation: string,
+    retryOpts?: { isRetryable?: (error: Error) => boolean }
+  ): Promise<T> {
     try {
-      const result = await withRetry(fn, { operation });
+      const result = await withRetry(fn, { operation, ...retryOpts });
       this.recordOutcome(true);
       return result;
     } catch (err) {
@@ -168,7 +171,10 @@ class QuaiService {
         config.rpcTimeout.callTimeoutMs,
         'callContract'
       );
-    }, 'callContract');
+    }, 'callContract', {
+      // CALL_EXCEPTION is permanent (contract doesn't implement the function) — don't retry
+      isRetryable: (err) => (err as { code?: string }).code !== 'CALL_EXCEPTION',
+    });
   }
 
   async getBlockTimestamp(blockNumber: number): Promise<number> {
@@ -308,32 +314,75 @@ class QuaiService {
     }
   }
 
-  async subscribeToEvents(
-    addresses: string[],
-    topics: string[],
-    callback: (log: IndexerLog) => void
-  ): Promise<void> {
-    if (!this.wsProvider) {
-      this.wsProvider = new quais.WebSocketProvider(config.quai.wsUrl, undefined, {
-        usePathing: true,
-      });
+  /**
+   * Probe a contract for ERC1155 metadata.
+   * ERC1155 contracts use uri(uint256) instead of name()/symbol(), but many
+   * implementations (e.g. OpenZeppelin) add optional name()/symbol() extensions.
+   * Strategy: try symbol()/name() first, fall back to uri(0) to confirm ERC1155.
+   * Returns null if the contract doesn't look like an ERC1155 at all.
+   */
+  async getERC1155Metadata(contractAddress: string): Promise<{
+    symbol: string;
+    name: string;
+  } | null> {
+    // Try symbol()/name() first (many ERC1155s support these as optional extensions)
+    try {
+      const [symbolRaw, nameRaw] = await Promise.all([
+        this.callContract(contractAddress, 'symbol()'),
+        this.callContract(contractAddress, 'name()'),
+      ]);
+
+      const abiCoder = quais.AbiCoder.defaultAbiCoder();
+      const symbol = abiCoder.decode(['string'], symbolRaw)[0] as string;
+      const name = abiCoder.decode(['string'], nameRaw)[0] as string;
+
+      const sanitizedSymbol = symbol
+        .replace(/[^a-zA-Z0-9.\-_]/g, '')
+        .slice(0, 32);
+      const sanitizedName = name
+        .replace(/[^\x20-\x7E]/g, '')
+        .slice(0, 128);
+
+      if (sanitizedSymbol && sanitizedName) {
+        return { symbol: sanitizedSymbol, name: sanitizedName };
+      }
+    } catch {
+      // symbol()/name() not implemented — try uri() fallback
     }
 
-    const filter = {
-      address: addresses,
-      topics: [topics],
-    };
+    // Fallback: call uri(0) to confirm it's an ERC1155 contract.
+    // callContract() only handles no-arg signatures, so we encode manually.
+    try {
+      const abiCoder = quais.AbiCoder.defaultAbiCoder();
+      const selector = quais.id('uri(uint256)').slice(0, 10);
+      const encodedArg = abiCoder.encode(['uint256'], [0]);
+      const calldata = selector + encodedArg.slice(2);
 
-    this.wsProvider.on(filter, callback);
-    logger.info({ addresses: addresses.length, topics }, 'Subscribed to events');
-  }
+      await this.rateLimiter.acquire();
+      await this.withTrackedRetry(async () => {
+        return withTimeout(
+          this.provider.call({
+            from: ZeroAddress,
+            to: contractAddress,
+            data: calldata,
+          }),
+          config.rpcTimeout.callTimeoutMs,
+          'getERC1155Metadata/uri'
+        );
+      }, 'getERC1155Metadata/uri');
 
-  async unsubscribe(): Promise<void> {
-    if (this.wsProvider) {
-      await this.wsProvider.destroy();
-      this.wsProvider = null;
+      // uri() responded — this is likely an ERC1155. Use address-based fallback names.
+      const shortAddr = contractAddress.slice(0, 10);
+      return {
+        symbol: `ERC1155-${shortAddr}`,
+        name: `ERC1155 Token (${contractAddress})`,
+      };
+    } catch {
+      // Not an ERC1155 contract
+      return null;
     }
   }
+
 }
 
 export const quai = new QuaiService();

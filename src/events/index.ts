@@ -23,6 +23,10 @@ import {
   handleModuleEnabled,
   handleModuleDisabled,
   handleReceived,
+  handleThresholdReached,
+  handleTransactionFailed,
+  handleTransactionExpired,
+  handleMinExecutionDelayChanged,
 } from './vault-core.js';
 import {
   handleRecoverySetup,
@@ -33,19 +37,13 @@ import {
   handleRecoveryCancelled,
 } from './social-recovery.js';
 import {
-  handleDailyLimitSet,
-  handleDailyLimitReset,
-  handleDailyLimitTransactionExecuted,
-} from './daily-limit.js';
-import {
-  handleAddressWhitelisted,
-  handleAddressRemovedFromWhitelist,
-  handleWhitelistTransactionExecuted,
-} from './whitelist.js';
-import {
   handleExecutionFromModuleSuccess,
   handleExecutionFromModuleFailure,
 } from './zodiac.js';
+import {
+  handleMessageSigned,
+  handleMessageUnsigned,
+} from './message-signing.js';
 
 export async function handleEvent(event: DecodedEvent): Promise<void> {
   try {
@@ -74,6 +72,15 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
       case 'TransactionCancelled':
         await handleTransactionCancelled(event);
         break;
+      case 'ThresholdReached':
+        await handleThresholdReached(event);
+        break;
+      case 'TransactionFailed':
+        await handleTransactionFailed(event);
+        break;
+      case 'TransactionExpired':
+        await handleTransactionExpired(event);
+        break;
       case 'OwnerAdded':
         await handleOwnerAdded(event);
         break;
@@ -91,6 +98,17 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
         break;
       case 'Received':
         await handleReceived(event);
+        break;
+      case 'MinExecutionDelayChanged':
+        await handleMinExecutionDelayChanged(event);
+        break;
+
+      // Message signing events (EIP-1271)
+      case 'MessageSigned':
+        await handleMessageSigned(event);
+        break;
+      case 'MessageUnsigned':
+        await handleMessageUnsigned(event);
         break;
 
       // Zodiac IAvatar events
@@ -119,28 +137,6 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
         break;
       case 'RecoveryCancelled':
         await handleRecoveryCancelled(event);
-        break;
-
-      // Daily limit events
-      case 'DailyLimitSet':
-        await handleDailyLimitSet(event);
-        break;
-      case 'DailyLimitReset':
-        await handleDailyLimitReset(event);
-        break;
-      case 'DailyLimitTransactionExecuted':
-        await handleDailyLimitTransactionExecuted(event);
-        break;
-
-      // Whitelist events
-      case 'AddressWhitelisted':
-        await handleAddressWhitelisted(event);
-        break;
-      case 'AddressRemovedFromWhitelist':
-        await handleAddressRemovedFromWhitelist(event);
-        break;
-      case 'WhitelistTransactionExecuted':
-        await handleWhitelistTransactionExecuted(event);
         break;
 
       // Token Transfer events are handled directly by the block processor

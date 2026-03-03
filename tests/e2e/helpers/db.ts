@@ -9,6 +9,7 @@ export interface WalletRecord {
   name?: string;
   threshold: number;
   owner_count: number;
+  min_execution_delay?: number;
   created_at_block: number;
   created_at_tx: string;
   created_at: string;
@@ -36,7 +37,7 @@ export interface TransactionRecord {
   data?: string;
   transaction_type: string;
   decoded_params?: Record<string, unknown>;
-  status: 'pending' | 'executed' | 'cancelled';
+  status: 'pending' | 'executed' | 'cancelled' | 'expired' | 'failed';
   confirmation_count: number;
   submitted_by: string;
   submitted_at_block: number;
@@ -46,6 +47,12 @@ export interface TransactionRecord {
   executed_by?: string;
   cancelled_at_block?: number;
   cancelled_at_tx?: string;
+  expiration?: number;
+  execution_delay?: number;
+  approved_at?: number;
+  executable_after?: number;
+  is_expired?: boolean;
+  failed_return_data?: string;
   created_at: string;
   updated_at: string;
 }
@@ -100,41 +107,6 @@ export interface ModuleExecutionRecord {
   created_at: string;
 }
 
-export interface DailyLimitStateRecord {
-  id: string;
-  wallet_address: string;
-  daily_limit: string;
-  spent_today: string;
-  last_reset_day: string;
-  updated_at: string;
-}
-
-export interface WhitelistEntryRecord {
-  id: string;
-  wallet_address: string;
-  whitelisted_address: string;
-  limit_amount?: string;
-  added_at_block: number;
-  added_at_tx?: string;
-  removed_at_block?: number;
-  removed_at_tx?: string;
-  is_active: boolean;
-  created_at: string;
-}
-
-export interface ModuleTransactionRecord {
-  id: string;
-  wallet_address: string;
-  module_type: string;
-  module_address: string;
-  to_address: string;
-  value: string;
-  remaining_limit?: string;
-  executed_at_block: number;
-  executed_at_tx: string;
-  created_at: string;
-}
-
 export interface SocialRecoveryConfigRecord {
   id: string;
   wallet_address: string;
@@ -175,6 +147,49 @@ export interface SocialRecoveryRecord {
   executed_at_tx?: string;
   cancelled_at_block?: number;
   cancelled_at_tx?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TokenRecord {
+  id: string;
+  address: string;
+  standard: 'ERC20' | 'ERC721' | 'ERC1155';
+  name: string;
+  symbol: string;
+  decimals: number;
+  discovered_at_block: number;
+  discovered_via: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TokenTransferRecord {
+  id: string;
+  token_address: string;
+  wallet_address: string;
+  from_address: string;
+  to_address: string;
+  value: string;
+  token_id?: string;
+  batch_index: number;
+  direction: 'inflow' | 'outflow';
+  block_number: number;
+  transaction_hash: string;
+  log_index: number;
+  created_at: string;
+}
+
+export interface SignedMessageRecord {
+  id: string;
+  wallet_address: string;
+  msg_hash: string;
+  data?: string;
+  signed_at_block: number;
+  signed_at_tx: string;
+  unsigned_at_block?: number;
+  unsigned_at_tx?: string;
+  is_active: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -417,91 +432,6 @@ export class DatabaseVerifier {
   }
 
   // ============================================
-  // DAILY LIMIT VERIFICATION
-  // ============================================
-
-  async getDailyLimitState(walletAddress: string): Promise<DailyLimitStateRecord | null> {
-    const { data, error } = await this.supabase
-      .from('daily_limit_state')
-      .select('*')
-      .eq('wallet_address', walletAddress.toLowerCase())
-      .maybeSingle();
-
-    if (error) throw error;
-    return data;
-  }
-
-  async verifyDailyLimitSet(walletAddress: string, expectedLimit: string): Promise<void> {
-    const state = await this.getDailyLimitState(walletAddress);
-    expect(state).not.toBeNull();
-    expect(state!.daily_limit).toBe(expectedLimit);
-  }
-
-  // ============================================
-  // WHITELIST VERIFICATION
-  // ============================================
-
-  async getWhitelistEntries(walletAddress: string): Promise<WhitelistEntryRecord[]> {
-    const { data, error } = await this.supabase
-      .from('whitelist_entries')
-      .select('*')
-      .eq('wallet_address', walletAddress.toLowerCase())
-      .order('added_at_block', { ascending: true });
-
-    if (error) throw error;
-    return data || [];
-  }
-
-  async verifyAddressWhitelisted(
-    walletAddress: string,
-    whitelistedAddress: string
-  ): Promise<void> {
-    const entries = await this.getWhitelistEntries(walletAddress);
-    const entry = entries.find(
-      (e) =>
-        e.whitelisted_address.toLowerCase() === whitelistedAddress.toLowerCase() &&
-        e.is_active === true
-    );
-    expect(entry).not.toBeUndefined();
-  }
-
-  async verifyAddressRemovedFromWhitelist(
-    walletAddress: string,
-    removedAddress: string
-  ): Promise<void> {
-    const entries = await this.getWhitelistEntries(walletAddress);
-    const entry = entries.find(
-      (e) => e.whitelisted_address.toLowerCase() === removedAddress.toLowerCase()
-    );
-    expect(entry).not.toBeUndefined();
-    expect(entry!.is_active).toBe(false);
-  }
-
-  // ============================================
-  // MODULE TRANSACTIONS
-  // ============================================
-
-  async getModuleTransactions(walletAddress: string): Promise<ModuleTransactionRecord[]> {
-    const { data, error } = await this.supabase
-      .from('module_transactions')
-      .select('*')
-      .eq('wallet_address', walletAddress.toLowerCase())
-      .order('executed_at_block', { ascending: false });
-
-    if (error) throw error;
-    return data || [];
-  }
-
-  async verifyModuleTransactionExecuted(
-    walletAddress: string,
-    moduleType: string
-  ): Promise<void> {
-    const transactions = await this.getModuleTransactions(walletAddress);
-    const tx = transactions.find((t) => t.module_type === moduleType);
-    expect(tx).not.toBeUndefined();
-  }
-
-  // ============================================
   // SOCIAL RECOVERY VERIFICATION
   // ============================================
 
@@ -599,5 +529,153 @@ export class DatabaseVerifier {
     if (error) throw error;
     expect(data).not.toBeNull();
     expect(data!.status).toBe(expectedStatus);
+  }
+
+  // ============================================
+  // SIGNED MESSAGE VERIFICATION (EIP-1271)
+  // ============================================
+
+  async getSignedMessages(walletAddress: string): Promise<SignedMessageRecord[]> {
+    const { data, error } = await this.supabase
+      .from('signed_messages')
+      .select('*')
+      .eq('wallet_address', walletAddress.toLowerCase())
+      .order('signed_at_block', { ascending: false });
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  async verifyMessageSigned(walletAddress: string, msgHash: string): Promise<void> {
+    const messages = await this.getSignedMessages(walletAddress);
+    const msg = messages.find((m) => m.msg_hash.toLowerCase() === msgHash.toLowerCase());
+    expect(msg).not.toBeUndefined();
+    expect(msg!.is_active).toBe(true);
+    expect(msg!.signed_at_block).toBeGreaterThan(0);
+  }
+
+  async verifyMessageUnsigned(walletAddress: string, msgHash: string): Promise<void> {
+    const messages = await this.getSignedMessages(walletAddress);
+    const msg = messages.find((m) => m.msg_hash.toLowerCase() === msgHash.toLowerCase());
+    expect(msg).not.toBeUndefined();
+    expect(msg!.is_active).toBe(false);
+    expect(msg!.unsigned_at_block).not.toBeNull();
+    expect(msg!.unsigned_at_tx).not.toBeNull();
+  }
+
+  // ============================================
+  // THRESHOLD REACHED VERIFICATION
+  // ============================================
+
+  async verifyThresholdReached(walletAddress: string, txHash: string): Promise<void> {
+    const tx = await this.getTransaction(walletAddress, txHash);
+    expect(tx).not.toBeNull();
+    expect(tx!.approved_at).not.toBeNull();
+    expect(tx!.approved_at).toBeGreaterThan(0);
+    expect(tx!.executable_after).not.toBeNull();
+  }
+
+  // ============================================
+  // TRANSACTION FAILED VERIFICATION
+  // ============================================
+
+  async verifyTransactionFailed(walletAddress: string, txHash: string): Promise<void> {
+    const tx = await this.getTransaction(walletAddress, txHash);
+    expect(tx).not.toBeNull();
+    expect(tx!.status).toBe('failed');
+  }
+
+  // ============================================
+  // TRANSACTION EXPIRED VERIFICATION
+  // ============================================
+
+  async verifyTransactionExpired(walletAddress: string, txHash: string): Promise<void> {
+    const tx = await this.getTransaction(walletAddress, txHash);
+    expect(tx).not.toBeNull();
+    expect(tx!.status).toBe('expired');
+    expect(tx!.is_expired).toBe(true);
+  }
+
+  // ============================================
+  // MIN EXECUTION DELAY VERIFICATION
+  // ============================================
+
+  async verifyMinExecutionDelay(walletAddress: string, expectedDelay: number): Promise<void> {
+    const wallet = await this.getWallet(walletAddress);
+    expect(wallet).not.toBeNull();
+    expect(wallet!.min_execution_delay).toBe(expectedDelay);
+  }
+
+  // ============================================
+  // TOKEN VERIFICATION
+  // ============================================
+
+  async getToken(tokenAddress: string): Promise<TokenRecord | null> {
+    const { data, error } = await this.supabase
+      .from('tokens')
+      .select('*')
+      .eq('address', tokenAddress.toLowerCase())
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
+  }
+
+  async getTokenTransfers(walletAddress: string): Promise<TokenTransferRecord[]> {
+    const { data, error } = await this.supabase
+      .from('token_transfers')
+      .select('*')
+      .eq('wallet_address', walletAddress.toLowerCase())
+      .order('block_number', { ascending: false });
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  async verifyTokenDiscovered(
+    tokenAddress: string,
+    expectedStandard: 'ERC20' | 'ERC721' | 'ERC1155'
+  ): Promise<void> {
+    const token = await this.getToken(tokenAddress);
+    expect(token).not.toBeNull();
+    expect(token!.standard).toBe(expectedStandard);
+  }
+
+  async verifyTokenTransferInflow(
+    walletAddress: string,
+    tokenAddress: string,
+    fromAddress: string,
+    opts: { value?: string; tokenId?: string; batchIndex?: number } = {}
+  ): Promise<void> {
+    const transfers = await this.getTokenTransfers(walletAddress);
+    const match = transfers.find(
+      (t) =>
+        t.token_address.toLowerCase() === tokenAddress.toLowerCase() &&
+        t.from_address.toLowerCase() === fromAddress.toLowerCase() &&
+        t.direction === 'inflow' &&
+        (opts.value === undefined || t.value === opts.value) &&
+        (opts.tokenId === undefined || t.token_id === opts.tokenId) &&
+        (opts.batchIndex === undefined || t.batch_index === opts.batchIndex)
+    );
+    expect(match).not.toBeUndefined();
+  }
+
+  async verifyTokenTransferOutflow(
+    walletAddress: string,
+    tokenAddress: string,
+    toAddress: string,
+    opts: { value?: string; tokenId?: string; batchIndex?: number } = {}
+  ): Promise<void> {
+    const transfers = await this.getTokenTransfers(walletAddress);
+    const match = transfers.find(
+      (t) =>
+        t.token_address.toLowerCase() === tokenAddress.toLowerCase() &&
+        t.to_address.toLowerCase() === toAddress.toLowerCase() &&
+        t.direction === 'outflow' &&
+        (opts.value === undefined || t.value === opts.value) &&
+        (opts.tokenId === undefined || t.token_id === opts.tokenId) &&
+        (opts.batchIndex === undefined || t.batch_index === opts.batchIndex)
+    );
+    expect(match).not.toBeUndefined();
   }
 }
