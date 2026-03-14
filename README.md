@@ -4,7 +4,7 @@ A blockchain indexing service for QuaiVault multisig wallets on Quai Network. In
 
 ## Features
 
-- Indexes 26 event types from QuaiVault, Factory, and module contracts (plus ERC20/ERC721/ERC1155 Transfer wildcard)
+- Indexes 28 event types from QuaiVault, Factory, and module contracts (plus ERC20/ERC721/ERC1155 Transfer wildcards)
 - Real-time updates via Supabase Realtime subscriptions
 - Historical backfill with resume capability
 - Transaction type decoding (transfer, wallet_admin, module_config, etc.)
@@ -75,6 +75,8 @@ NODE_ENV=development
 HEALTH_CHECK_ENABLED=true
 HEALTH_CHECK_PORT=8080
 HEALTH_MAX_BLOCKS_BEHIND=100
+# HEALTH_CHECK_HOST=0.0.0.0
+# TRUSTED_PROXIES=10.0.0.1,10.0.0.2
 ```
 
 ### Database Setup
@@ -119,7 +121,7 @@ src/
 │   ├── social-recovery.ts  # Recovery* events
 │   ├── message-signing.ts  # MessageSigned, MessageUnsigned
 │   ├── token-transfer.ts   # ERC20/ERC721/ERC1155 Transfer events
-│   └── helpers.ts          # validateEventArgs, safeParseInt
+│   └── helpers.ts          # validateEventArgs, safeParseInt, safeParseHex
 ├── services/
 │   ├── quai.ts             # Quai RPC client with retry
 │   ├── supabase.ts         # Database operations
@@ -166,13 +168,13 @@ src/
 | `social_recoveries` | Recovery requests |
 | `social_recovery_approvals` | Guardian approvals |
 
-## Indexed Events (26 + Token Transfer wildcard)
+## Indexed Events (28 + Token Transfer wildcards)
 
 | Contract | Events |
 |----------|--------|
 | QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
-| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `ModuleEnabled`, `ModuleDisabled`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
-| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
+| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled`, `RecoveryInvalidated`, `RecoveryExpiredEvent` |
 | ERC20/ERC721 | `Transfer` (wildcard scan for auto-discovered tokens) |
 | ERC1155 | `TransferSingle`, `TransferBatch` (wildcard scan for auto-discovered tokens) |
 
@@ -215,6 +217,8 @@ The indexer decodes calldata for proposed transactions:
 | `MULTISEND_ADDRESS` | - | MultiSend utility contract address |
 | `SEED_TOKEN_ADDRESSES` | - | Comma-separated ERC20/ERC721 addresses to track from startup |
 | `CORS_ALLOWED_ORIGINS` | - | Comma-separated allowed origins for health endpoint |
+| `HEALTH_CHECK_HOST` | `0.0.0.0` | Bind address for health server |
+| `TRUSTED_PROXIES` | - | Comma-separated proxy IPs trusted for X-Forwarded-For |
 | `BATCH_SIZE` | `1000` | Blocks per batch during backfill |
 | `POLL_INTERVAL` | `5000` | Milliseconds between polls |
 | `START_BLOCK` | `0` | Block to start indexing from |
@@ -237,6 +241,16 @@ The indexer decodes calldata for proposed transactions:
 | `RETRY_MAX_RETRIES` | `5` | Max consecutive failures before reset |
 | `RETRY_BASE_DELAY_MS` | `1000` | Initial retry delay |
 | `RETRY_MAX_DELAY_MS` | `60000` | Max retry delay cap |
+| `RETRY_ERROR_THRESHOLD` | `3` | Failures before error log level |
+| `NOT_TOKEN_CACHE_SIZE` | `100000` | Max entries in not-a-token LRU cache |
+| `TIMESTAMP_CACHE_SIZE` | `1000` | Max cached block timestamps |
+| `WALLET_WARNING_THRESHOLD` | `500000` | Log warning when tracked wallets exceed this |
+| `RATE_LIMIT_REQUESTS` | `50` | RPC rate limit requests per window |
+| `RATE_LIMIT_WINDOW_MS` | `1000` | RPC rate limit time window |
+| `HEALTH_RATE_LIMIT_WINDOW_MS` | `60000` | Health endpoint rate limit window |
+| `HEALTH_RATE_LIMIT_MAX` | `60` | Max health requests per window |
+| `HEALTH_RATE_LIMIT_MAX_IPS` | `10000` | Max tracked IPs for health rate limiting |
+| `HEALTH_RATE_LIMIT_CLEANUP_MS` | `300000` | Stale IP cleanup interval |
 
 ## Logging
 
@@ -272,7 +286,7 @@ The indexer exposes HTTP endpoints for health monitoring:
     "lastIndexedBlock": 5499998,
     "blocksBehind": 0,
     "isSyncing": false,
-    "trackedWallets": 42
+    "skippedEvents": 0
   }
 }
 ```

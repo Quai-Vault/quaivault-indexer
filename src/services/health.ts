@@ -27,6 +27,7 @@ export interface HealthStatus {
     lastIndexedBlock: number | null;
     blocksBehind: number | null;
     isSyncing: boolean;
+    skippedEvents: number;
   };
 }
 
@@ -39,6 +40,7 @@ class HealthService {
   private server: Server | null = null;
   private isIndexerRunning = false;
   private rpcCircuitBreakerOpen = false;
+  private skippedEvents = 0;
 
   // O(1) per-IP rate limiter (replaces the old Map<string, number[]>)
   private rateLimiter = new IpRateLimiter(
@@ -50,6 +52,10 @@ class HealthService {
 
   setIndexerRunning(running: boolean): void {
     this.isIndexerRunning = running;
+  }
+
+  incrementSkippedEvents(): void {
+    this.skippedEvents++;
   }
 
   /**
@@ -67,25 +73,30 @@ class HealthService {
    * Validate an IP string is a plausible IPv4 or IPv6 address.
    */
   private isValidIp(ip: string): boolean {
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return true;
+    if (/^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/.test(ip)) return true;
     if (ip.includes(':') && /^[0-9a-fA-F:]+$/.test(ip)) return true;
     return false;
   }
 
   /**
    * Extract client IP from request, handling proxies.
+   * Only trusts X-Forwarded-For when the direct connection is from a trusted proxy.
    * Invalid/spoofed IPs collapse to 'unknown' to share a single rate-limit bucket.
    */
   private getClientIp(req: IncomingMessage): string {
-    let raw: string;
-    const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded) {
-      const ips = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-      raw = ips.split(',')[0].trim();
-    } else {
-      raw = req.socket.remoteAddress || 'unknown';
+    const socketIp = req.socket.remoteAddress || 'unknown';
+
+    // Only read X-Forwarded-For when the direct connection is from a trusted proxy
+    if (config.health.trustedProxies.length > 0 && config.health.trustedProxies.includes(socketIp)) {
+      const forwarded = req.headers['x-forwarded-for'];
+      if (forwarded) {
+        const ips = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+        const raw = ips.split(',')[0].trim();
+        return this.isValidIp(raw) ? raw : 'unknown';
+      }
     }
-    return this.isValidIp(raw) ? raw : 'unknown';
+
+    return this.isValidIp(socketIp) ? socketIp : 'unknown';
   }
 
   /**
@@ -107,6 +118,10 @@ class HealthService {
   private getCorsHeaders(origin: string | undefined): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': "default-src 'none'",
     };
 
     if (origin && ALLOWED_ORIGINS.includes(origin)) {
@@ -163,8 +178,8 @@ class HealthService {
       }
     });
 
-    this.server.listen(config.health.port, () => {
-      logger.info({ port: config.health.port }, 'Health check server started with rate limiting');
+    this.server.listen(config.health.port, config.health.host, () => {
+      logger.info({ port: config.health.port, host: config.health.host }, 'Health check server started with rate limiting');
     });
   }
 
@@ -272,6 +287,7 @@ class HealthService {
         lastIndexedBlock,
         blocksBehind,
         isSyncing,
+        skippedEvents: this.skippedEvents,
       },
     };
   }

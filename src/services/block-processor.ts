@@ -1,9 +1,10 @@
+import { LRUCache } from 'lru-cache';
 import { config } from '../config.js';
 import { quai } from './quai.js';
 import { supabase } from './supabase.js';
 import {
   decodeEvent,
-  getAllEventTopics,
+  getWalletEventTopics,
   getModuleEventTopics,
   getTokenTransferTopic,
   getERC1155TransferTopics,
@@ -14,6 +15,7 @@ import { handleTokenTransfer } from '../events/token-transfer.js';
 import { logger } from '../utils/logger.js';
 import { getModuleContractAddresses } from '../utils/modules.js';
 import { IndexerLog, DecodedEvent, TokenStandard } from '../types/index.js';
+import { health } from './health.js';
 
 /**
  * Callback context for block processing.
@@ -24,8 +26,8 @@ export interface BlockProcessorContext {
   trackedWallets: Set<string>;
   /** Map of lowercase token addresses to their standard (ERC20/ERC721/ERC1155) — serves as a cache */
   trackedTokens: Map<string, TokenStandard>;
-  /** Addresses confirmed not to be tokens — persists across batches to avoid redundant RPC probes */
-  notTokenCache: Set<string>;
+  /** Addresses confirmed not to be tokens — bounded LRU to prevent unbounded memory growth */
+  notTokenCache: LRUCache<string, boolean>;
   /** Called when a new wallet is discovered via factory events */
   onWalletDiscovered: (address: string, event: DecodedEvent) => void;
 }
@@ -75,7 +77,7 @@ async function scanTransferLogs(
   fromBlock: number,
   toBlock: number,
   ctx: BlockProcessorContext,
-  notTokens: Set<string>,
+  notTokens: LRUCache<string, boolean>,
   seen: Set<string>,
   allLogs: Array<{ log: IndexerLog; priority: number }>,
   discovery: DiscoveryState,
@@ -97,8 +99,10 @@ async function scanTransferLogs(
       outflowTopics.push(t === opts.outflowTopicIndex ? paddedChunk : null);
     }
 
-    const inflowLogs = await quai.getLogs(null, inflowTopics, fromBlock, toBlock);
-    const outflowLogs = await quai.getLogs(null, outflowTopics, fromBlock, toBlock);
+    const [inflowLogs, outflowLogs] = await Promise.all([
+      quai.getLogs(null, inflowTopics, fromBlock, toBlock),
+      quai.getLogs(null, outflowTopics, fromBlock, toBlock),
+    ]);
 
     for (const log of [...inflowLogs, ...outflowLogs]) {
       if (log.topics.length < opts.minTopics) continue;
@@ -116,14 +120,14 @@ async function scanTransferLogs(
         try {
           const standard = await autoDiscoverToken(tokenAddr, log, ctx, opts.isERC1155);
           if (!standard) {
-            notTokens.add(tokenAddr);
+            notTokens.set(tokenAddr, true);
             continue;
           }
           discovery.count++;
           discovery.discovered = true;
         } catch (err) {
           logger.warn({ err, token: tokenAddr }, 'Token auto-discovery failed during Transfer scan');
-          notTokens.add(tokenAddr);
+          notTokens.set(tokenAddr, true);
           continue;
         }
       }
@@ -266,7 +270,7 @@ export async function processBlockRange(
   if (ctx.trackedWallets.size > 0) {
     const walletAddresses = Array.from(ctx.trackedWallets);
     const chunkSize = config.indexer.getLogsChunkSize;
-    const eventTopics = [getAllEventTopics()];
+    const eventTopics = [getWalletEventTopics()];
 
     for (let i = 0; i < walletAddresses.length; i += chunkSize) {
       const chunk = walletAddresses.slice(i, i + chunkSize);
@@ -398,6 +402,7 @@ export async function processBlockRange(
         { err, block: log.blockNumber, tx: log.transactionHash, logIndex: log.index },
         'Failed to process event, skipping'
       );
+      health.incrementSkippedEvents();
     }
   }
 

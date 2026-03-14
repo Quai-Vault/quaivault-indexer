@@ -23,8 +23,8 @@ export const EVENT_SIGNATURES = {
   OwnerAdded: quais.id('OwnerAdded(address)'),
   OwnerRemoved: quais.id('OwnerRemoved(address)'),
   ThresholdChanged: quais.id('ThresholdChanged(uint256)'),
-  ModuleEnabled: quais.id('ModuleEnabled(address)'),
-  ModuleDisabled: quais.id('ModuleDisabled(address)'),
+  EnabledModule: quais.id('EnabledModule(address)'),
+  DisabledModule: quais.id('DisabledModule(address)'),
   Received: quais.id('Received(address,uint256)'),
   MinExecutionDelayChanged: quais.id('MinExecutionDelayChanged(uint32,uint32)'),
   MessageSigned: quais.id('MessageSigned(bytes32,bytes)'),
@@ -45,6 +45,8 @@ export const EVENT_SIGNATURES = {
   ),
   RecoveryExecuted: quais.id('RecoveryExecuted(address,bytes32)'),
   RecoveryCancelled: quais.id('RecoveryCancelled(address,bytes32)'),
+  RecoveryInvalidated: quais.id('RecoveryInvalidated(address,bytes32)'),
+  RecoveryExpiredEvent: quais.id('RecoveryExpiredEvent(address,bytes32)'),
 
   // ERC20/ERC721 Transfer (topic only — decoded from raw topics, not via EVENT_ABIS)
   Transfer: quais.id('Transfer(address,address,uint256)'),
@@ -94,8 +96,8 @@ const EVENT_ABIS: Record<string, string[]> = {
   OwnerAdded: ['address indexed owner'],
   OwnerRemoved: ['address indexed owner'],
   ThresholdChanged: ['uint256 threshold'],
-  ModuleEnabled: ['address indexed module'],
-  ModuleDisabled: ['address indexed module'],
+  EnabledModule: ['address indexed module'],
+  DisabledModule: ['address indexed module'],
   Received: ['address indexed sender', 'uint256 amount'],
   MinExecutionDelayChanged: ['uint32 oldDelay', 'uint32 newDelay'],
   MessageSigned: ['bytes32 indexed msgHash', 'bytes data'],
@@ -137,7 +139,23 @@ const EVENT_ABIS: Record<string, string[]> = {
     'address indexed wallet',
     'bytes32 indexed recoveryHash',
   ],
+  RecoveryInvalidated: [
+    'address indexed wallet',
+    'bytes32 indexed recoveryHash',
+  ],
+  RecoveryExpiredEvent: [
+    'address indexed wallet',
+    'bytes32 indexed recoveryHash',
+  ],
 };
+
+// Cached Interface objects for event decoding (avoid re-creating per call)
+const EVENT_INTERFACES = new Map<string, quais.Interface>(
+  Object.entries(EVENT_ABIS).map(([name, abi]) => [
+    name,
+    new quais.Interface([`event ${name}(${abi.join(', ')})`]),
+  ])
+);
 
 export function decodeEvent(log: IndexerLog): DecodedEvent | null {
   const topic0 = log.topics[0];
@@ -163,9 +181,7 @@ export function decodeEvent(log: IndexerLog): DecodedEvent | null {
   }
 
   try {
-    const iface = new quais.Interface([
-      `event ${eventName}(${abiFragment.join(', ')})`,
-    ]);
+    const iface = EVENT_INTERFACES.get(eventName)!;
 
     const decoded = iface.parseLog({
       topics: log.topics as string[],
@@ -220,6 +236,19 @@ export function getAllEventTopics(): string[] {
   return Object.values(EVENT_SIGNATURES);
 }
 
+/** Transfer event names handled separately by the wildcard transfer scan. */
+const TRANSFER_TOPIC_NAMES = new Set(['Transfer', 'TransferSingle', 'TransferBatch']);
+
+/**
+ * Get event topics for wallet contract queries, excluding Transfer events.
+ * Transfer events are fetched separately via wildcard scans to avoid duplicate fetching.
+ */
+export function getWalletEventTopics(): string[] {
+  return Object.entries(EVENT_SIGNATURES)
+    .filter(([name]) => !TRANSFER_TOPIC_NAMES.has(name))
+    .map(([, sig]) => sig);
+}
+
 export function getSocialRecoveryEventTopics(): string[] {
   return [
     EVENT_SIGNATURES.RecoverySetup,
@@ -228,6 +257,8 @@ export function getSocialRecoveryEventTopics(): string[] {
     EVENT_SIGNATURES.RecoveryApprovalRevoked,
     EVENT_SIGNATURES.RecoveryExecuted,
     EVENT_SIGNATURES.RecoveryCancelled,
+    EVENT_SIGNATURES.RecoveryInvalidated,
+    EVENT_SIGNATURES.RecoveryExpiredEvent,
   ];
 }
 
@@ -379,6 +410,14 @@ const FUNCTION_SELECTORS: Record<string, { name: string; abi: string; type: Tran
   },
 };
 
+// Cached Interface objects for calldata decoding (avoid re-creating per call)
+const FUNCTION_INTERFACES = new Map<string, quais.Interface>(
+  Object.entries(FUNCTION_SELECTORS).map(([selector, info]) => [
+    selector,
+    new quais.Interface([info.abi]),
+  ])
+);
+
 /** Set of function selectors that target token contracts (ERC20/721/1155) */
 const TOKEN_SELECTORS = new Set(
   Object.entries(FUNCTION_SELECTORS)
@@ -444,18 +483,7 @@ export function decodeCalldata(
       };
     }
 
-    // If there's data but no value, it's an external contract call
-    if (BigInt(value) === 0n) {
-      return {
-        transactionType: 'external_call',
-        decodedParams: {
-          function: 'unknown',
-          args: { rawData: data },
-        },
-      };
-    }
-
-    // Has both value and data - external call with value
+    // Unknown selector with data — external contract call
     return {
       transactionType: 'external_call',
       decodedParams: {
@@ -479,7 +507,7 @@ export function decodeCalldata(
 
   // Decode the function arguments
   try {
-    const iface = new quais.Interface([functionInfo.abi]);
+    const iface = FUNCTION_INTERFACES.get(selector)!;
     const decoded = iface.parseTransaction({ data, value });
 
     if (!decoded) {

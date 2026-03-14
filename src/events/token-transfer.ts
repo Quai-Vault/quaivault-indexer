@@ -14,6 +14,9 @@ import { EVENT_SIGNATURES } from '../services/decoder.js';
 import { logger } from '../utils/logger.js';
 import { normalizeTokenParticipant } from '../utils/validation.js';
 
+/** Cached ABI coder instance (avoid re-creating per call). */
+const abiCoder = quais.AbiCoder.defaultAbiCoder();
+
 /** Maximum items processed from a single TransferBatch event (defense-in-depth). */
 const MAX_BATCH_SIZE = 256;
 
@@ -140,7 +143,6 @@ async function handleERC1155TransferBatch(
   const to = normalizeTokenParticipant(addressFromTopic(log.topics[3]), 'TransferBatch.to');
 
   try {
-    const abiCoder = quais.AbiCoder.defaultAbiCoder();
     const decoded = abiCoder.decode(['uint256[]', 'uint256[]'], log.data);
     const ids = decoded[0] as bigint[];
     const values = decoded[1] as bigint[];

@@ -8,6 +8,7 @@
 
 import type { DecodedEvent } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { health } from '../services/health.js';
 
 // Domain handlers
 import { handleWalletCreated, handleWalletRegistered } from './factory.js';
@@ -20,8 +21,8 @@ import {
   handleOwnerAdded,
   handleOwnerRemoved,
   handleThresholdChanged,
-  handleModuleEnabled,
-  handleModuleDisabled,
+  handleEnabledModule,
+  handleDisabledModule,
   handleReceived,
   handleThresholdReached,
   handleTransactionFailed,
@@ -35,6 +36,8 @@ import {
   handleRecoveryApprovalRevoked,
   handleRecoveryExecuted,
   handleRecoveryCancelled,
+  handleRecoveryInvalidated,
+  handleRecoveryExpiredEvent,
 } from './social-recovery.js';
 import {
   handleExecutionFromModuleSuccess,
@@ -90,11 +93,11 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
       case 'ThresholdChanged':
         await handleThresholdChanged(event);
         break;
-      case 'ModuleEnabled':
-        await handleModuleEnabled(event);
+      case 'EnabledModule':
+        await handleEnabledModule(event);
         break;
-      case 'ModuleDisabled':
-        await handleModuleDisabled(event);
+      case 'DisabledModule':
+        await handleDisabledModule(event);
         break;
       case 'Received':
         await handleReceived(event);
@@ -138,6 +141,12 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
       case 'RecoveryCancelled':
         await handleRecoveryCancelled(event);
         break;
+      case 'RecoveryInvalidated':
+        await handleRecoveryInvalidated(event);
+        break;
+      case 'RecoveryExpiredEvent':
+        await handleRecoveryExpiredEvent(event);
+        break;
 
       // Token Transfer events are handled directly by the block processor
       // via handleTokenTransfer(). If one reaches here, log and skip.
@@ -161,5 +170,6 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
       },
       'Error handling event - skipping'
     );
+    health.incrementSkippedEvents();
   }
 }

@@ -36,6 +36,8 @@ import {
   handleRecoveryInitiated,
   handleRecoveryApproved,
   handleRecoveryExecuted,
+  handleRecoveryInvalidated,
+  handleRecoveryExpiredEvent,
 } from '../../src/events/social-recovery.js';
 import { supabase } from '../../src/services/supabase.js';
 import { quai } from '../../src/services/quai.js';
@@ -149,6 +151,7 @@ describe('social-recovery event handlers', () => {
           walletAddress: '0xWallet',
           recoveryHash: '0xHash',
           executionTime: 1700000000 + 3600, // blockTimestamp + recoveryPeriod
+          expiration: 1700000000 + 3600 + 3600, // executionTime + recoveryPeriod
           requiredThreshold: 2,
           status: 'pending',
         })
@@ -270,6 +273,50 @@ describe('social-recovery event handlers', () => {
         '0xWallet',
         '0xHash',
         'executed',
+        300,
+        '0xtx789'
+      );
+    });
+  });
+
+  describe('handleRecoveryInvalidated', () => {
+    it('updates recovery status to invalidated', async () => {
+      const event = makeEvent({
+        name: 'RecoveryInvalidated',
+        args: {
+          wallet: '0xWallet',
+          recoveryHash: '0xHash',
+        },
+      });
+
+      await handleRecoveryInvalidated(event);
+
+      expect(supabase.updateRecoveryStatus).toHaveBeenCalledWith(
+        '0xWallet',
+        '0xHash',
+        'invalidated',
+        300,
+        '0xtx789'
+      );
+    });
+  });
+
+  describe('handleRecoveryExpiredEvent', () => {
+    it('updates recovery status to expired', async () => {
+      const event = makeEvent({
+        name: 'RecoveryExpiredEvent',
+        args: {
+          wallet: '0xWallet',
+          recoveryHash: '0xHash',
+        },
+      });
+
+      await handleRecoveryExpiredEvent(event);
+
+      expect(supabase.updateRecoveryStatus).toHaveBeenCalledWith(
+        '0xWallet',
+        '0xHash',
+        'expired',
         300,
         '0xtx789'
       );

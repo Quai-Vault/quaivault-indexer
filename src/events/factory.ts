@@ -47,7 +47,7 @@ export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
   await supabase.upsertWallet({
     address: wallet,
     threshold: safeParseInt(threshold, 'WalletCreated.threshold'),
-    ownerCount: owners.length,
+    ownerCount: 0,
     createdAtBlock: event.blockNumber,
     createdAtTx: event.transactionHash,
   });
@@ -85,7 +85,7 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
     await supabase.upsertWallet({
       address: wallet,
       threshold: thresholdValue,
-      ownerCount: ownerAddresses.length,
+      ownerCount: 0,
       createdAtBlock: event.blockNumber,
       createdAtTx: event.transactionHash,
     });

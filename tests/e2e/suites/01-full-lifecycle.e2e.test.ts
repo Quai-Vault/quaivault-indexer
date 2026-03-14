@@ -15,12 +15,13 @@
  *                  TransactionExecuted, TransactionCancelled, ThresholdReached,
  *                  TransactionFailed, TransactionExpired
  *   Owners:        OwnerAdded, OwnerRemoved, ThresholdChanged
- *   Modules:       ModuleEnabled, ModuleDisabled
+ *   Modules:       EnabledModule, DisabledModule
  *   Zodiac:        ExecutionFromModuleSuccess, ExecutionFromModuleFailure
  *   Signing:       MessageSigned, MessageUnsigned
  *   Config:        MinExecutionDelayChanged
  *   Recovery:      RecoverySetup, RecoveryInitiated, RecoveryApproved,
- *                  RecoveryApprovalRevoked, RecoveryCancelled
+ *                  RecoveryApprovalRevoked, RecoveryCancelled,
+ *                  RecoveryInvalidated, RecoveryExpiredEvent
  *
  * Time-dependent tests (timelock, expiration) use real 5–6 minute delays.
  *
@@ -1068,7 +1069,7 @@ describe('E2E Indexer Full Lifecycle (Orchard Testnet)', () => {
   // ==========================================================================
 
   describe('Module Management & Execution', () => {
-    it('should index ModuleEnabled, ExecutionFromModuleSuccess, ExecutionFromModuleFailure, ModuleDisabled', async () => {
+    it('should index EnabledModule, ExecutionFromModuleSuccess, ExecutionFromModuleFailure, DisabledModule', async () => {
       if (!mockModule) {
         console.log('  ⏭️ MockModule not configured — skipping');
         return;
@@ -1093,11 +1094,11 @@ describe('E2E Indexer Full Lifecycle (Orchard Testnet)', () => {
             (m) => m.module_address.toLowerCase() === moduleAddr.toLowerCase() && m.is_active
           ) || null;
         },
-        'ModuleEnabled indexed',
+        'EnabledModule indexed',
         e2eConfig.txConfirmationTimeout
       );
       await db.verifyModuleEnabled(walletAddress, moduleAddr);
-      console.log('  ✓ ModuleEnabled indexed');
+      console.log('  ✓ EnabledModule indexed');
 
       // Execute QUAI transfer via module (success)
       await withRetry(async () => {
@@ -1152,11 +1153,11 @@ describe('E2E Indexer Full Lifecycle (Orchard Testnet)', () => {
             (m) => m.module_address.toLowerCase() === moduleAddr.toLowerCase() && !m.is_active
           ) || null;
         },
-        'ModuleDisabled indexed',
+        'DisabledModule indexed',
         e2eConfig.txConfirmationTimeout
       );
       await db.verifyModuleDisabled(walletAddress, moduleAddr);
-      console.log('  ✓ ModuleDisabled indexed');
+      console.log('  ✓ DisabledModule indexed');
     });
   });
 

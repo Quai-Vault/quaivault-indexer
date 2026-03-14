@@ -69,6 +69,12 @@ export async function handleRecoveryInitiated(event: DecodedEvent): Promise<void
     return;
   }
 
+  const expiration = executionTime + recoveryPeriod;
+  if (!Number.isSafeInteger(expiration)) {
+    logger.error({ executionTime, recoveryPeriod, wallet }, 'expiration exceeds safe integer range');
+    return;
+  }
+
   await supabase.upsertRecovery({
     walletAddress: wallet,
     recoveryHash: recoveryHash,
@@ -78,6 +84,7 @@ export async function handleRecoveryInitiated(event: DecodedEvent): Promise<void
     approvalCount: 0,
     requiredThreshold: recoveryConfig?.threshold || 1,
     executionTime: executionTime,
+    expiration: expiration,
     status: 'pending',
     initiatedAtBlock: event.blockNumber,
     initiatedAtTx: event.transactionHash,
@@ -169,5 +176,45 @@ export async function handleRecoveryCancelled(event: DecodedEvent): Promise<void
   logger.info(
     { wallet, recoveryHash },
     'Recovery cancelled'
+  );
+}
+
+export async function handleRecoveryInvalidated(event: DecodedEvent): Promise<void> {
+  const { wallet, recoveryHash } = validateEventArgs<{
+    wallet: string;
+    recoveryHash: string;
+  }>(event.args, ['wallet', 'recoveryHash'], 'RecoveryInvalidated');
+
+  await supabase.updateRecoveryStatus(
+    wallet,
+    recoveryHash,
+    'invalidated',
+    event.blockNumber,
+    event.transactionHash
+  );
+
+  logger.info(
+    { wallet, recoveryHash },
+    'Recovery invalidated (superseded by executed recovery)'
+  );
+}
+
+export async function handleRecoveryExpiredEvent(event: DecodedEvent): Promise<void> {
+  const { wallet, recoveryHash } = validateEventArgs<{
+    wallet: string;
+    recoveryHash: string;
+  }>(event.args, ['wallet', 'recoveryHash'], 'RecoveryExpiredEvent');
+
+  await supabase.updateRecoveryStatus(
+    wallet,
+    recoveryHash,
+    'expired',
+    event.blockNumber,
+    event.transactionHash
+  );
+
+  logger.info(
+    { wallet, recoveryHash },
+    'Recovery expired'
   );
 }

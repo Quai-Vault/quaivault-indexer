@@ -1,3 +1,4 @@
+import { LRUCache } from 'lru-cache';
 import { config } from './config.js';
 import { quai } from './services/quai.js';
 import { supabase } from './services/supabase.js';
@@ -19,8 +20,8 @@ export class Indexer {
   private trackedWallets: Set<string> = new Set();
   // Map of lowercase token addresses to their standard (ERC20/ERC721)
   private trackedTokens: Map<string, TokenStandard> = new Map();
-  // Addresses confirmed not to be tokens — persists across batches to avoid redundant RPC probes
-  private notTokenCache: Set<string> = new Set();
+  // Addresses confirmed not to be tokens — bounded LRU to prevent unbounded memory growth
+  private notTokenCache = new LRUCache<string, boolean>({ max: config.cache.notTokenCacheSize });
   // Retry tracker for poll loop resilience
   private pollRetryTracker = new RetryTracker();
   // Circuit breaker for RPC failures
@@ -36,10 +37,11 @@ export class Indexer {
   // Token refresh throttle — refresh from DB at most once per interval
   private lastTokenRefresh = 0;
   private readonly TOKEN_REFRESH_INTERVAL = 60_000;
-  // Wallet backfill concurrency limiter and tracking for graceful shutdown
+  // Wallet backfill concurrency limiter, queue, and tracking for graceful shutdown
   private activeWalletBackfills = 0;
   private readonly MAX_CONCURRENT_WALLET_BACKFILLS = 3;
   private walletBackfillPromises: Set<Promise<void>> = new Set();
+  private pendingWalletBackfills: Array<{ wallet: string; fromBlock: number; toBlock: number }> = [];
 
   async start(): Promise<void> {
     logger.info('Starting indexer...');
@@ -127,6 +129,10 @@ export class Indexer {
       await Promise.allSettled(this.walletBackfillPromises);
     }
 
+    if (this.pendingWalletBackfills.length > 0) {
+      logger.warn({ count: this.pendingWalletBackfills.length }, 'Pending wallet backfills will be lost on shutdown');
+    }
+
     await health.stop();
     logger.info('Indexer stopped');
   }
@@ -144,7 +150,10 @@ export class Indexer {
           await withRetry(
             async () => {
               await this.indexBlockRange(start, end);
-              await supabase.updateIndexerState(end);
+              const block = await quai.getBlock(end);
+              const hash = block?.hash ?? undefined;
+              await supabase.updateIndexerState(end, hash);
+              this.lastBlockHash = hash ?? null;
             },
             { operation: `backfill-batch-${start}-${end}` }
           );
@@ -189,22 +198,13 @@ export class Indexer {
           const historyEnd = event.blockNumber - 1;
           if (historyEnd >= config.indexer.startBlock) {
             if (this.activeWalletBackfills >= this.MAX_CONCURRENT_WALLET_BACKFILLS) {
-              logger.warn(
-                { wallet: walletLower, active: this.activeWalletBackfills },
-                'Wallet backfill concurrency limit reached, deferring'
+              this.pendingWalletBackfills.push({ wallet: walletLower, fromBlock: config.indexer.startBlock, toBlock: historyEnd });
+              logger.info(
+                { wallet: walletLower, active: this.activeWalletBackfills, queued: this.pendingWalletBackfills.length },
+                'Wallet backfill queued (concurrency limit reached)'
               );
             } else {
-              this.activeWalletBackfills++;
-              const backfillPromise = withRetry(
-                () => this.backfillWalletHistory(walletLower, config.indexer.startBlock, historyEnd),
-                { operation: `backfillWalletHistory(${walletLower})` }
-              )
-                .catch((err) => logger.error({ err, wallet: walletLower }, 'Wallet history backfill failed after retries'))
-                .finally(() => {
-                  this.activeWalletBackfills--;
-                  this.walletBackfillPromises.delete(backfillPromise);
-                });
-              this.walletBackfillPromises.add(backfillPromise);
+              this.startWalletBackfill(walletLower, config.indexer.startBlock, historyEnd);
             }
           }
         }
@@ -291,6 +291,7 @@ export class Indexer {
           },
           'Chain reorg detected — rolling back indexer state'
         );
+        await supabase.deleteEventsAfterBlock(rollbackTo);
         await supabase.updateIndexerState(rollbackTo, undefined);
         this.lastBlockHash = null;
         return { caughtUp: false };
@@ -353,6 +354,29 @@ export class Indexer {
     }
 
     return { caughtUp: false };
+  }
+
+  private startWalletBackfill(wallet: string, fromBlock: number, toBlock: number): void {
+    this.activeWalletBackfills++;
+    const backfillPromise = withRetry(
+      () => this.backfillWalletHistory(wallet, fromBlock, toBlock),
+      { operation: `backfillWalletHistory(${wallet})` }
+    )
+      .catch((err) => logger.error({ err, wallet }, 'Wallet history backfill failed after retries'))
+      .finally(() => {
+        this.activeWalletBackfills--;
+        this.walletBackfillPromises.delete(backfillPromise);
+        this.drainPendingBackfills();
+      });
+    this.walletBackfillPromises.add(backfillPromise);
+  }
+
+  private drainPendingBackfills(): void {
+    while (this.pendingWalletBackfills.length > 0 && this.activeWalletBackfills < this.MAX_CONCURRENT_WALLET_BACKFILLS) {
+      const next = this.pendingWalletBackfills.shift()!;
+      logger.info({ wallet: next.wallet, remaining: this.pendingWalletBackfills.length }, 'Starting queued wallet backfill');
+      this.startWalletBackfill(next.wallet, next.fromBlock, next.toBlock);
+    }
   }
 
   /**

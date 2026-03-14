@@ -601,7 +601,7 @@ interface Wallet {
   address: string;
   name: string | null;
   threshold: number;
-  owner_count: number;
+  owner_count: number; // managed by DB trigger — starts at 0, auto-incremented as owners are added
   min_execution_delay: number; // seconds before approved tx can execute (0 = immediate)
   created_at_block: number;
   created_at_tx: string;
@@ -770,13 +770,18 @@ interface SocialRecovery {
   approval_count: number;
   required_threshold: number;
   execution_time: number;
-  status: 'pending' | 'executed' | 'cancelled';
+  status: 'pending' | 'executed' | 'cancelled' | 'invalidated' | 'expired';
+  expiration: number | null;
   initiated_at_block: number;
   initiated_at_tx: string;
   executed_at_block: number | null;
   executed_at_tx: string | null;
   cancelled_at_block: number | null;
   cancelled_at_tx: string | null;
+  expired_at_block: number | null;
+  expired_at_tx: string | null;
+  invalidated_at_block: number | null;
+  invalidated_at_tx: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1031,6 +1036,7 @@ interface HealthStatus {
     lastIndexedBlock: number | null;
     blocksBehind: number | null;
     isSyncing: boolean;
+    skippedEvents: number;
   };
 }
 
@@ -1186,13 +1192,13 @@ async function getTransactionExecutor(walletAddress: string, txHash: string) {
 
 ## Indexed Events Summary
 
-The indexer captures 27 blockchain events from 3 contract sources (plus ERC20/ERC721/ERC1155 Transfer wildcard):
+The indexer captures 28 blockchain events from 3 contract sources (plus ERC20/ERC721/ERC1155 Transfer wildcard):
 
 | Contract | Events |
 |----------|--------|
 | QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
-| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `ModuleEnabled`, `ModuleDisabled`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
-| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
+| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled`, `RecoveryInvalidated`, `RecoveryExpiredEvent` |
 | ERC20/ERC721 | `Transfer` (wildcard scan for auto-discovered tokens) |
 | ERC1155 | `TransferSingle`, `TransferBatch` (wildcard scan for auto-discovered tokens) |
 

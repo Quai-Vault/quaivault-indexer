@@ -61,7 +61,7 @@ describe('factory event handlers', () => {
       expect(supabase.upsertWallet).toHaveBeenCalledWith({
         address: '0xWALLET',
         threshold: 2,
-        ownerCount: 2,
+        ownerCount: 0,
         createdAtBlock: 100,
         createdAtTx: '0xtx123',
       });
@@ -126,7 +126,7 @@ describe('factory event handlers', () => {
       expect(supabase.upsertWallet).toHaveBeenCalledWith({
         address: '0xWALLET',
         threshold: 2,
-        ownerCount: 2,
+        ownerCount: 0,
         createdAtBlock: 100,
         createdAtTx: '0xtx123',
       });

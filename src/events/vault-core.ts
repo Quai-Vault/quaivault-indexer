@@ -211,8 +211,6 @@ export async function handleOwnerAdded(event: DecodedEvent): Promise<void> {
     isActive: true,
   });
 
-  await supabase.updateWalletOwnerCount(event.address, 1);
-
   logger.info({ wallet: event.address, owner }, 'Owner added');
 }
 
@@ -228,8 +226,6 @@ export async function handleOwnerRemoved(event: DecodedEvent): Promise<void> {
     event.transactionHash
   );
 
-  await supabase.updateWalletOwnerCount(event.address, -1);
-
   logger.info({ wallet: event.address, owner }, 'Owner removed');
 }
 
@@ -243,10 +239,10 @@ export async function handleThresholdChanged(event: DecodedEvent): Promise<void>
   logger.info({ wallet: event.address, threshold }, 'Threshold changed');
 }
 
-export async function handleModuleEnabled(event: DecodedEvent): Promise<void> {
+export async function handleEnabledModule(event: DecodedEvent): Promise<void> {
   const { module } = validateEventArgs<{
     module: string;
-  }>(event.args, ['module'], 'ModuleEnabled');
+  }>(event.args, ['module'], 'EnabledModule');
 
   await supabase.addModule({
     walletAddress: event.address,
@@ -259,10 +255,10 @@ export async function handleModuleEnabled(event: DecodedEvent): Promise<void> {
   logger.info({ wallet: event.address, module }, 'Module enabled');
 }
 
-export async function handleModuleDisabled(event: DecodedEvent): Promise<void> {
+export async function handleDisabledModule(event: DecodedEvent): Promise<void> {
   const { module } = validateEventArgs<{
     module: string;
-  }>(event.args, ['module'], 'ModuleDisabled');
+  }>(event.args, ['module'], 'DisabledModule');
 
   await supabase.disableModule(
     event.address,

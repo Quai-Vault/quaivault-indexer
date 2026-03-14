@@ -24,7 +24,7 @@ export function validateEventArgs<T extends Record<string, unknown>>(
  */
 export function safeParseInt(value: string, fieldName: string): number {
   const n = Number(value);
-  if (!Number.isFinite(n)) {
+  if (!Number.isFinite(n) || Math.trunc(n) !== n) {
     throw new Error(`Invalid numeric value for ${fieldName}: "${value}"`);
   }
   return n;

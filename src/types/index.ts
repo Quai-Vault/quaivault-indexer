@@ -154,13 +154,18 @@ export interface SocialRecovery {
   approvalCount: number;
   requiredThreshold: number;
   executionTime: number;
-  status: 'pending' | 'executed' | 'cancelled';
+  status: 'pending' | 'executed' | 'cancelled' | 'invalidated' | 'expired';
   initiatedAtBlock: number;
   initiatedAtTx: string;
   executedAtBlock?: number;
   executedAtTx?: string;
   cancelledAtBlock?: number;
   cancelledAtTx?: string;
+  expiration?: number;
+  expiredAtBlock?: number;
+  expiredAtTx?: string;
+  invalidatedAtBlock?: number;
+  invalidatedAtTx?: string;
 }
 
 export interface SocialRecoveryApproval {

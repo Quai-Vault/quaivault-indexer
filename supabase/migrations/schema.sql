@@ -31,7 +31,7 @@ DO $$
 BEGIN
     -- Recovery status enum
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'recovery_status') THEN
-        CREATE TYPE public.recovery_status AS ENUM ('pending', 'executed', 'cancelled');
+        CREATE TYPE public.recovery_status AS ENUM ('pending', 'executed', 'cancelled', 'invalidated', 'expired');
     END IF;
 END
 $$;
@@ -444,7 +444,7 @@ BEGIN
             removed_at_tx TEXT,
             is_active BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(wallet_address, guardian_address, added_at_block)
+            UNIQUE(wallet_address, guardian_address)
         )', schema_name, schema_name);
 
     -- Recoveries
@@ -466,6 +466,11 @@ BEGIN
             executed_at_tx TEXT,
             cancelled_at_block BIGINT,
             cancelled_at_tx TEXT,
+            expiration BIGINT,
+            expired_at_block BIGINT,
+            expired_at_tx TEXT,
+            invalidated_at_block BIGINT,
+            invalidated_at_tx TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(wallet_address, recovery_hash)
@@ -635,21 +640,58 @@ BEGIN
         $func$ LANGUAGE plpgsql
     ', schema_name, schema_name, schema_name);
 
-    -- Owner count increment function (schema-specific)
+    -- Atomic owner count trigger (replaces the old increment_owner_count RPC function).
+    -- Automatically updates wallets.owner_count when wallet_owners rows are inserted/updated.
     EXECUTE format('
-        CREATE OR REPLACE FUNCTION %I.increment_owner_count(
-            wallet_addr TEXT,
-            delta_value INTEGER
+        CREATE OR REPLACE FUNCTION %I.update_owner_count()
+        RETURNS trigger AS $func$
+        BEGIN
+            IF TG_OP = ''INSERT'' AND NEW.is_active = TRUE THEN
+                UPDATE %I.wallets SET owner_count = owner_count + 1, updated_at = NOW()
+                WHERE address = NEW.wallet_address;
+            ELSIF TG_OP = ''UPDATE'' AND OLD.is_active = TRUE AND NEW.is_active = FALSE THEN
+                UPDATE %I.wallets SET owner_count = GREATEST(owner_count - 1, 0), updated_at = NOW()
+                WHERE address = NEW.wallet_address;
+            END IF;
+            RETURN NEW;
+        END;
+        $func$ LANGUAGE plpgsql
+    ', schema_name, schema_name, schema_name);
+
+    -- Atomic guardian update stored procedure (replaces multi-step upsertRecoveryConfig).
+    -- In a single transaction: upserts config, deactivates old guardians, inserts new guardians.
+    EXECUTE format('
+        CREATE OR REPLACE FUNCTION %I.upsert_recovery_config_atomic(
+            p_wallet TEXT,
+            p_threshold INTEGER,
+            p_recovery_period INTEGER,
+            p_setup_at_block INTEGER,
+            p_setup_at_tx TEXT,
+            p_guardians TEXT[]
         )
         RETURNS void AS $func$
         BEGIN
-            UPDATE %I.wallets
-            SET owner_count = owner_count + delta_value,
-                updated_at = NOW()
-            WHERE address = wallet_addr;
+            INSERT INTO %I.social_recovery_configs (wallet_address, threshold, recovery_period, setup_at_block, setup_at_tx)
+            VALUES (p_wallet, p_threshold, p_recovery_period, p_setup_at_block, p_setup_at_tx)
+            ON CONFLICT (wallet_address) DO UPDATE SET
+                threshold = EXCLUDED.threshold,
+                recovery_period = EXCLUDED.recovery_period,
+                setup_at_block = EXCLUDED.setup_at_block,
+                setup_at_tx = EXCLUDED.setup_at_tx;
+
+            UPDATE %I.social_recovery_guardians SET is_active = FALSE WHERE wallet_address = p_wallet;
+
+            IF array_length(p_guardians, 1) IS NOT NULL THEN
+                INSERT INTO %I.social_recovery_guardians (wallet_address, guardian_address, added_at_block, added_at_tx, is_active)
+                SELECT p_wallet, unnest(p_guardians), p_setup_at_block, p_setup_at_tx, TRUE
+                ON CONFLICT (wallet_address, guardian_address) DO UPDATE SET
+                    is_active = TRUE,
+                    added_at_block = EXCLUDED.added_at_block,
+                    added_at_tx = EXCLUDED.added_at_tx;
+            END IF;
         END;
         $func$ LANGUAGE plpgsql
-    ', schema_name, schema_name);
+    ', schema_name, schema_name, schema_name, schema_name);
 
     -- Distinct token addresses for a wallet (for frontend token discovery at scale)
     EXECUTE format('
@@ -675,6 +717,9 @@ BEGIN
 
     EXECUTE format('DROP TRIGGER IF EXISTS trigger_transactions_updated_at ON %I.transactions', schema_name);
     EXECUTE format('CREATE TRIGGER trigger_transactions_updated_at BEFORE UPDATE ON %I.transactions FOR EACH ROW EXECUTE FUNCTION public.update_updated_at()', schema_name);
+
+    EXECUTE format('DROP TRIGGER IF EXISTS trigger_update_owner_count ON %I.wallet_owners', schema_name);
+    EXECUTE format('CREATE TRIGGER trigger_update_owner_count AFTER INSERT OR UPDATE ON %I.wallet_owners FOR EACH ROW EXECUTE FUNCTION %I.update_owner_count()', schema_name, schema_name);
 
     EXECUTE format('DROP TRIGGER IF EXISTS trigger_update_recovery_approval_count ON %I.social_recovery_approvals', schema_name);
     EXECUTE format('CREATE TRIGGER trigger_update_recovery_approval_count AFTER INSERT OR UPDATE ON %I.social_recovery_approvals FOR EACH ROW EXECUTE FUNCTION %I.update_recovery_approval_count()', schema_name, schema_name);

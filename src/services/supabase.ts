@@ -82,6 +82,25 @@ class SupabaseService {
     };
   }
 
+  /**
+   * Delete events recorded after a given block number (reorg cleanup).
+   * Best-effort: logs errors but does not throw, so indexer can continue.
+   */
+  async deleteEventsAfterBlock(blockNumber: number): Promise<void> {
+    const tables = [
+      { table: 'token_transfers', column: 'block_number' },
+      { table: 'deposits', column: 'deposited_at_block' },
+      { table: 'module_executions', column: 'executed_at_block' },
+      { table: 'signed_messages', column: 'signed_at_block' },
+      { table: 'social_recovery_approvals', column: 'approved_at_block' },
+      { table: 'confirmations', column: 'confirmed_at_block' },
+    ];
+    for (const { table, column } of tables) {
+      const { error } = await this.client.from(table).delete().gt(column, blockNumber);
+      if (error) logger.error({ err: error, table, blockNumber }, 'Reorg cleanup failed for table');
+    }
+  }
+
   async updateIndexerState(blockNumber: number, blockHash?: string): Promise<void> {
     const update: Record<string, unknown> = {
       last_indexed_block: blockNumber,
@@ -189,23 +208,14 @@ class SupabaseService {
   async updateWalletThreshold(address: string, threshold: number): Promise<void> {
     const normalizedAddress = validateAndNormalizeAddress(address, 'address');
 
-    const { error } = await this.client
-      .from('wallets')
-      .update({ threshold })
-      .eq('address', normalizedAddress);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('wallets')
+        .update({ threshold })
+        .eq('address', normalizedAddress);
 
-    if (error) this.fail('updateWalletThreshold', error);
-  }
-
-  async updateWalletOwnerCount(address: string, delta: number): Promise<void> {
-    const normalizedAddress = validateAndNormalizeAddress(address, 'address');
-
-    const { error } = await this.client.rpc('increment_owner_count', {
-      wallet_addr: normalizedAddress,
-      delta_value: delta,
-    });
-
-    if (error) this.fail('updateWalletOwnerCount', error);
+      if (error) this.fail('updateWalletThreshold', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'updateWalletThreshold' });
   }
 
   // ============================================
@@ -217,15 +227,17 @@ class SupabaseService {
     const ownerAddress = validateAndNormalizeAddress(owner.ownerAddress, 'owner.ownerAddress');
     const addedAtTx = validateBytes32(owner.addedAtTx, 'owner.addedAtTx');
 
-    const { error } = await this.client.from('wallet_owners').insert({
-      wallet_address: walletAddress,
-      owner_address: ownerAddress,
-      added_at_block: owner.addedAtBlock,
-      added_at_tx: addedAtTx,
-      is_active: true,
-    });
+    await withRetry(async () => {
+      const { error } = await this.client.from('wallet_owners').insert({
+        wallet_address: walletAddress,
+        owner_address: ownerAddress,
+        added_at_block: owner.addedAtBlock,
+        added_at_tx: addedAtTx,
+        is_active: true,
+      });
 
-    if (error && error.code !== '23505') this.fail('addOwner', error); // Ignore duplicate
+      if (error && error.code !== '23505') this.fail('addOwner', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'addOwner' });
   }
 
   async addOwnersBatch(owners: WalletOwner[]): Promise<void> {
@@ -260,18 +272,20 @@ class SupabaseService {
     const normalizedOwner = validateAndNormalizeAddress(ownerAddress, 'ownerAddress');
     const normalizedTx = validateBytes32(removedAtTx, 'removedAtTx');
 
-    const { error } = await this.client
-      .from('wallet_owners')
-      .update({
-        is_active: false,
-        removed_at_block: removedAtBlock,
-        removed_at_tx: normalizedTx,
-      })
-      .eq('wallet_address', normalizedWallet)
-      .eq('owner_address', normalizedOwner)
-      .eq('is_active', true);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('wallet_owners')
+        .update({
+          is_active: false,
+          removed_at_block: removedAtBlock,
+          removed_at_tx: normalizedTx,
+        })
+        .eq('wallet_address', normalizedWallet)
+        .eq('owner_address', normalizedOwner)
+        .eq('is_active', true);
 
-    if (error) this.fail('removeOwner', error);
+      if (error) this.fail('removeOwner', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'removeOwner' });
   }
 
   // ============================================
@@ -283,18 +297,20 @@ class SupabaseService {
     const moduleAddress = validateAndNormalizeAddress(module.moduleAddress, 'module.moduleAddress');
     const enabledAtTx = validateBytes32(module.enabledAtTx, 'module.enabledAtTx');
 
-    const { error } = await this.client.from('wallet_modules').upsert(
-      {
-        wallet_address: walletAddress,
-        module_address: moduleAddress,
-        enabled_at_block: module.enabledAtBlock,
-        enabled_at_tx: enabledAtTx,
-        is_active: true,
-      },
-      { onConflict: 'wallet_address,module_address' }
-    );
+    await withRetry(async () => {
+      const { error } = await this.client.from('wallet_modules').upsert(
+        {
+          wallet_address: walletAddress,
+          module_address: moduleAddress,
+          enabled_at_block: module.enabledAtBlock,
+          enabled_at_tx: enabledAtTx,
+          is_active: true,
+        },
+        { onConflict: 'wallet_address,module_address' }
+      );
 
-    if (error) this.fail('addModule', error);
+      if (error) this.fail('addModule', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'addModule' });
   }
 
   async disableModule(
@@ -307,18 +323,20 @@ class SupabaseService {
     const normalizedModule = validateAndNormalizeAddress(moduleAddress, 'moduleAddress');
     const normalizedTx = validateBytes32(disabledAtTx, 'disabledAtTx');
 
-    const { error } = await this.client
-      .from('wallet_modules')
-      .update({
-        is_active: false,
-        disabled_at_block: disabledAtBlock,
-        disabled_at_tx: normalizedTx,
-      })
-      .eq('wallet_address', normalizedWallet)
-      .eq('module_address', normalizedModule)
-      .eq('is_active', true);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('wallet_modules')
+        .update({
+          is_active: false,
+          disabled_at_block: disabledAtBlock,
+          disabled_at_tx: normalizedTx,
+        })
+        .eq('wallet_address', normalizedWallet)
+        .eq('module_address', normalizedModule)
+        .eq('is_active', true);
 
-    if (error) this.fail('disableModule', error);
+      if (error) this.fail('disableModule', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'disableModule' });
   }
 
   // ============================================
@@ -391,13 +409,15 @@ class SupabaseService {
     if (fields.is_expired !== undefined) updateData.is_expired = fields.is_expired;
     if (fields.failed_return_data !== undefined) updateData.failed_return_data = validateHexData(fields.failed_return_data, 'failed_return_data');
 
-    const { error } = await this.client
-      .from('transactions')
-      .update(updateData)
-      .eq('wallet_address', normalizedWallet)
-      .eq('tx_hash', normalizedTxHash);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('transactions')
+        .update(updateData)
+        .eq('wallet_address', normalizedWallet)
+        .eq('tx_hash', normalizedTxHash);
 
-    if (error) this.fail('updateTransactionStatus', error);
+      if (error) this.fail('updateTransactionStatus', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'updateTransactionStatus' });
   }
 
   async updateTransactionApproval(
@@ -408,27 +428,31 @@ class SupabaseService {
     const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
     const normalizedTxHash = validateBytes32(txHash, 'txHash');
 
-    const { error } = await this.client
-      .from('transactions')
-      .update({
-        approved_at: fields.approved_at,
-        executable_after: fields.executable_after,
-      })
-      .eq('wallet_address', normalizedWallet)
-      .eq('tx_hash', normalizedTxHash);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('transactions')
+        .update({
+          approved_at: fields.approved_at,
+          executable_after: fields.executable_after,
+        })
+        .eq('wallet_address', normalizedWallet)
+        .eq('tx_hash', normalizedTxHash);
 
-    if (error) this.fail('updateTransactionApproval', error);
+      if (error) this.fail('updateTransactionApproval', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'updateTransactionApproval' });
   }
 
   async updateWalletDelay(address: string, minExecutionDelay: number): Promise<void> {
     const normalizedAddress = validateAndNormalizeAddress(address, 'address');
 
-    const { error } = await this.client
-      .from('wallets')
-      .update({ min_execution_delay: minExecutionDelay })
-      .eq('address', normalizedAddress);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('wallets')
+        .update({ min_execution_delay: minExecutionDelay })
+        .eq('address', normalizedAddress);
 
-    if (error) this.fail('updateWalletDelay', error);
+      if (error) this.fail('updateWalletDelay', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'updateWalletDelay' });
   }
 
   // ============================================
@@ -441,16 +465,18 @@ class SupabaseService {
     const txHash = validateBytes32(confirmation.txHash, 'confirmation.txHash');
     const confirmedAtTx = validateBytes32(confirmation.confirmedAtTx, 'confirmation.confirmedAtTx');
 
-    const { error } = await this.client.from('confirmations').insert({
-      wallet_address: walletAddress,
-      tx_hash: txHash,
-      owner_address: ownerAddress,
-      confirmed_at_block: confirmation.confirmedAtBlock,
-      confirmed_at_tx: confirmedAtTx,
-      is_active: true,
-    });
+    await withRetry(async () => {
+      const { error } = await this.client.from('confirmations').insert({
+        wallet_address: walletAddress,
+        tx_hash: txHash,
+        owner_address: ownerAddress,
+        confirmed_at_block: confirmation.confirmedAtBlock,
+        confirmed_at_tx: confirmedAtTx,
+        is_active: true,
+      });
 
-    if (error && error.code !== '23505') this.fail('addConfirmation', error); // Ignore duplicate
+      if (error && error.code !== '23505') this.fail('addConfirmation', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'addConfirmation' });
   }
 
   async revokeConfirmation(
@@ -465,19 +491,21 @@ class SupabaseService {
     const normalizedTxHash = validateBytes32(txHash, 'txHash');
     const normalizedRevokedTx = validateBytes32(revokedAtTx, 'revokedAtTx');
 
-    const { error } = await this.client
-      .from('confirmations')
-      .update({
-        is_active: false,
-        revoked_at_block: revokedAtBlock,
-        revoked_at_tx: normalizedRevokedTx,
-      })
-      .eq('wallet_address', normalizedWallet)
-      .eq('tx_hash', normalizedTxHash)
-      .eq('owner_address', normalizedOwner)
-      .eq('is_active', true);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('confirmations')
+        .update({
+          is_active: false,
+          revoked_at_block: revokedAtBlock,
+          revoked_at_tx: normalizedRevokedTx,
+        })
+        .eq('wallet_address', normalizedWallet)
+        .eq('tx_hash', normalizedTxHash)
+        .eq('owner_address', normalizedOwner)
+        .eq('is_active', true);
 
-    if (error) this.fail('revokeConfirmation', error);
+      if (error) this.fail('revokeConfirmation', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'revokeConfirmation' });
   }
 
   // ============================================
@@ -493,67 +521,18 @@ class SupabaseService {
       validateAndNormalizeAddress(guardian, `config.guardians[${idx}]`)
     );
 
-    // First, upsert the config
-    const { error: configError } = await this.client
-      .from('social_recovery_configs')
-      .upsert(
-        {
-          wallet_address: walletAddress,
-          threshold: recoveryConfig.threshold,
-          recovery_period: recoveryConfig.recoveryPeriod,
-          setup_at_block: recoveryConfig.setupAtBlock,
-          setup_at_tx: setupAtTx,
-        },
-        { onConflict: 'wallet_address' }
-      );
+    await withRetry(async () => {
+      const { error } = await this.client.rpc('upsert_recovery_config_atomic', {
+        p_wallet: walletAddress,
+        p_threshold: recoveryConfig.threshold,
+        p_recovery_period: recoveryConfig.recoveryPeriod,
+        p_setup_at_block: recoveryConfig.setupAtBlock,
+        p_setup_at_tx: setupAtTx,
+        p_guardians: normalizedGuardians,
+      });
 
-    if (configError) this.fail('upsertRecoveryConfig', configError);
-
-    // Guardian transition: deactivate old, insert new.
-    // Snapshot previously active guardians so we can restore exactly those on failure.
-    const { data: previouslyActive } = await this.client
-      .from('social_recovery_guardians')
-      .select('guardian_address')
-      .eq('wallet_address', walletAddress)
-      .eq('is_active', true);
-
-    const { error: deactivateError } = await this.client
-      .from('social_recovery_guardians')
-      .update({ is_active: false })
-      .eq('wallet_address', walletAddress);
-
-    if (deactivateError) this.fail('upsertRecoveryConfig/deactivateGuardians', deactivateError);
-
-    if (normalizedGuardians.length > 0) {
-      const guardianRecords = normalizedGuardians.map((guardian) => ({
-        wallet_address: walletAddress,
-        guardian_address: guardian,
-        added_at_block: recoveryConfig.setupAtBlock,
-        added_at_tx: setupAtTx,
-        is_active: true,
-      }));
-
-      const { error: guardianError } = await this.client
-        .from('social_recovery_guardians')
-        .insert(guardianRecords);
-
-      if (guardianError && guardianError.code !== '23505') {
-        // Compensate: re-activate only the guardians that were active before
-        logger.error({ err: guardianError, walletAddress }, 'Guardian insert failed, restoring previous guardians');
-        if (previouslyActive && previouslyActive.length > 0) {
-          const previousAddresses = previouslyActive.map((g: { guardian_address: string }) => g.guardian_address);
-          const { error: restoreError } = await this.client
-            .from('social_recovery_guardians')
-            .update({ is_active: true })
-            .eq('wallet_address', walletAddress)
-            .in('guardian_address', previousAddresses);
-          if (restoreError) {
-            logger.error({ err: restoreError, walletAddress }, 'Guardian restoration also failed — guardians may be in inconsistent state');
-          }
-        }
-        this.fail('upsertRecoveryConfig/insertGuardians', guardianError);
-      }
-    }
+      if (error) this.fail('upsertRecoveryConfig', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'upsertRecoveryConfig' });
   }
 
   async upsertRecovery(recovery: SocialRecovery): Promise<void> {
@@ -577,6 +556,7 @@ class SupabaseService {
         approval_count: recovery.approvalCount,
         required_threshold: recovery.requiredThreshold,
         execution_time: recovery.executionTime,
+        expiration: recovery.expiration ?? null,
         status: recovery.status,
         initiated_at_block: recovery.initiatedAtBlock,
         initiated_at_tx: initiatedAtTx,
@@ -645,7 +625,7 @@ class SupabaseService {
   async updateRecoveryStatus(
     walletAddress: string,
     recoveryHash: string,
-    status: 'executed' | 'cancelled',
+    status: 'executed' | 'cancelled' | 'invalidated' | 'expired',
     blockNumber: number,
     txHash: string
   ): Promise<void> {
@@ -658,6 +638,12 @@ class SupabaseService {
     if (status === 'executed') {
       updateData.executed_at_block = blockNumber;
       updateData.executed_at_tx = normalizedTxHash;
+    } else if (status === 'invalidated') {
+      updateData.invalidated_at_block = blockNumber;
+      updateData.invalidated_at_tx = normalizedTxHash;
+    } else if (status === 'expired') {
+      updateData.expired_at_block = blockNumber;
+      updateData.expired_at_tx = normalizedTxHash;
     } else {
       updateData.cancelled_at_block = blockNumber;
       updateData.cancelled_at_tx = normalizedTxHash;
@@ -667,7 +653,8 @@ class SupabaseService {
       .from('social_recoveries')
       .update(updateData)
       .eq('wallet_address', normalizedWallet)
-      .eq('recovery_hash', normalizedRecoveryHash);
+      .eq('recovery_hash', normalizedRecoveryHash)
+      .eq('status', 'pending');
 
     if (error) this.fail('updateRecoveryStatus', error);
   }
@@ -726,9 +713,11 @@ class SupabaseService {
       record.data_hash = execution.dataHash;
     }
 
-    const { error } = await this.client.from('module_executions').insert(record);
+    await withRetry(async () => {
+      const { error } = await this.client.from('module_executions').insert(record);
 
-    if (error && error.code !== '23505') this.fail('addModuleExecution', error); // Ignore duplicates
+      if (error && error.code !== '23505') this.fail('addModuleExecution', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'addModuleExecution' });
   }
 
   async getModuleExecutions(
@@ -789,15 +778,17 @@ class SupabaseService {
     const senderAddress = validateAndNormalizeAddress(deposit.senderAddress, 'deposit.senderAddress');
     const depositedAtTx = validateBytes32(deposit.depositedAtTx, 'deposit.depositedAtTx');
 
-    const { error } = await this.client.from('deposits').insert({
-      wallet_address: walletAddress,
-      sender_address: senderAddress,
-      amount: deposit.amount,
-      deposited_at_block: deposit.depositedAtBlock,
-      deposited_at_tx: depositedAtTx,
-    });
+    await withRetry(async () => {
+      const { error } = await this.client.from('deposits').insert({
+        wallet_address: walletAddress,
+        sender_address: senderAddress,
+        amount: deposit.amount,
+        deposited_at_block: deposit.depositedAtBlock,
+        deposited_at_tx: depositedAtTx,
+      });
 
-    if (error && error.code !== '23505') this.fail('addDeposit', error); // Ignore duplicates
+      if (error && error.code !== '23505') this.fail('addDeposit', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'addDeposit' });
   }
 
   // ============================================
@@ -957,17 +948,19 @@ class SupabaseService {
     const normalizedHash = validateBytes32(msgHash, 'msgHash');
     const normalizedTx = validateBytes32(fields.unsignedAtTx, 'unsignedAtTx');
 
-    const { error } = await this.client
-      .from('signed_messages')
-      .update({
-        unsigned_at_block: fields.unsignedAtBlock,
-        unsigned_at_tx: normalizedTx,
-        is_active: fields.isActive,
-      })
-      .eq('wallet_address', normalizedWallet)
-      .eq('msg_hash', normalizedHash);
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('signed_messages')
+        .update({
+          unsigned_at_block: fields.unsignedAtBlock,
+          unsigned_at_tx: normalizedTx,
+          is_active: fields.isActive,
+        })
+        .eq('wallet_address', normalizedWallet)
+        .eq('msg_hash', normalizedHash);
 
-    if (error) this.fail('updateSignedMessage', error);
+      if (error) this.fail('updateSignedMessage', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'updateSignedMessage' });
   }
 }
 

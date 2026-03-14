@@ -1,3 +1,4 @@
+import { LRUCache } from 'lru-cache';
 import { config } from './config.js';
 import { quai } from './services/quai.js';
 import { supabase } from './services/supabase.js';
@@ -24,6 +25,16 @@ async function backfill(): Promise<void> {
     process.env.BACKFILL_FROM || String(config.indexer.startBlock)
   );
   const toBlock = parseInt(process.env.BACKFILL_TO || String(currentBlock));
+
+  if (!Number.isFinite(fromBlock) || fromBlock < 0) {
+    throw new Error(`Invalid BACKFILL_FROM: ${process.env.BACKFILL_FROM}`);
+  }
+  if (!Number.isFinite(toBlock) || toBlock < 0) {
+    throw new Error(`Invalid BACKFILL_TO: ${process.env.BACKFILL_TO}`);
+  }
+  if (fromBlock > toBlock) {
+    throw new Error(`BACKFILL_FROM (${fromBlock}) must be <= BACKFILL_TO (${toBlock})`);
+  }
 
   logger.info({ fromBlock, toBlock, totalBlocks: toBlock - fromBlock }, 'Backfill range');
 
@@ -59,8 +70,8 @@ async function backfill(): Promise<void> {
   tokens.forEach((t) => trackedTokens.set(t.address.toLowerCase(), t.standard));
   logger.info({ count: trackedTokens.size }, 'Loaded tracked tokens');
 
-  // Persistent cache of addresses confirmed not to be tokens (avoids redundant RPC probes)
-  const notTokenCache: Set<string> = new Set();
+  // Bounded cache of addresses confirmed not to be tokens (avoids redundant RPC probes)
+  const notTokenCache = new LRUCache<string, boolean>({ max: config.cache.notTokenCacheSize });
 
   await supabase.setIsSyncing(true);
 

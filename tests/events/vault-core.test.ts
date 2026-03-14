@@ -9,7 +9,6 @@ vi.mock('../../src/services/supabase.js', () => ({
     updateTransactionStatus: vi.fn().mockResolvedValue(undefined),
     addOwner: vi.fn().mockResolvedValue(undefined),
     removeOwner: vi.fn().mockResolvedValue(undefined),
-    updateWalletOwnerCount: vi.fn().mockResolvedValue(undefined),
     updateWalletThreshold: vi.fn().mockResolvedValue(undefined),
     addModule: vi.fn().mockResolvedValue(undefined),
     disableModule: vi.fn().mockResolvedValue(undefined),

@@ -497,10 +497,11 @@ systemctl list-units --type=service | grep quai
 ## Security Recommendations
 
 1. **Environment Files**: Never commit `.env` files. Use `.env.*.example` templates.
-2. **Service Keys**: Use dedicated Supabase service keys per environment.
-3. **Network**: Run behind a firewall; health check ports should not be public.
-4. **Updates**: Regularly update dependencies for security patches.
-5. **Backups**: The indexer is stateless; Supabase handles data persistence.
+2. **Service Keys**: `SUPABASE_SERVICE_KEY` uses the service_role key which bypasses Row Level Security. The indexer should run in a network-isolated environment (private subnet, VPN, or container network) with no public ingress. For production, consider creating a dedicated Postgres role with only the permissions the indexer needs instead of using the service_role key.
+3. **Network**: Run behind a firewall; health check ports should not be public. Configure `HEALTH_CHECK_HOST=127.0.0.1` to bind only to localhost if the health endpoint is accessed via a reverse proxy.
+4. **Trusted Proxies**: If running behind a load balancer, set `TRUSTED_PROXIES` to the proxy IPs (comma-separated) so the health endpoint correctly identifies client IPs from `X-Forwarded-For`. Without this, the header is ignored and the socket address is used directly.
+5. **Updates**: Regularly update dependencies for security patches.
+6. **Backups**: The indexer is stateless; Supabase handles data persistence.
 
 ---
 

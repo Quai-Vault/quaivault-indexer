@@ -14,6 +14,14 @@ export class SlidingWindowRateLimiter {
     private readonly maxRequests: number
   ) {}
 
+  /**
+   * Wait until a request slot is available in the current window.
+   *
+   * Trade-off: a burst of requests arriving just before the window resets can
+   * be followed by another full window immediately after the reset, allowing up
+   * to 2× maxRequests in a short period. This is acceptable for RPC rate
+   * limiting where the goal is amortized throughput, not strict per-second caps.
+   */
   async acquire(): Promise<void> {
     const now = Date.now();
 

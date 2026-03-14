@@ -59,4 +59,14 @@ if (enableFileLogging) {
 export const logger = pino({
   level: logLevel,
   transport: { targets },
+  serializers: {
+    err: (err) => {
+      const s = pino.stdSerializers.err(err);
+      if (!isDev && s) {
+        const { stack: _, ...rest } = s;
+        return rest;
+      }
+      return s;
+    },
+  },
 });

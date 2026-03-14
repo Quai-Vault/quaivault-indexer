@@ -7,6 +7,9 @@ import { withTimeout } from '../utils/timeout.js';
 import { logger } from '../utils/logger.js';
 import { IndexerLog } from '../types/index.js';
 
+// Cached ABI coder instance (avoid re-creating per call)
+const abiCoder = quais.AbiCoder.defaultAbiCoder();
+
 // RPC connection health thresholds
 const RPC_HEALTH = {
   staleThresholdMs: 60000,     // Consider unhealthy if no success for 1 minute
@@ -39,7 +42,11 @@ class QuaiService {
     this.timestampCache = new LRUCache<number, number>({
       max: config.cache.timestampCacheSize,
     });
-    logger.debug({ rpcUrl: config.quai.rpcUrl }, 'QuaiService initialized with JsonRpcProvider');
+    try {
+      logger.debug({ rpcHost: new URL(config.quai.rpcUrl).hostname }, 'QuaiService initialized with JsonRpcProvider');
+    } catch {
+      logger.debug('QuaiService initialized with JsonRpcProvider');
+    }
   }
 
   /**
@@ -219,8 +226,12 @@ class QuaiService {
         'getBlock'
       );
       if (!block) return null;
+      if (!block.hash) {
+        logger.error({ blockNumber }, 'Block hash missing');
+        return null;
+      }
       return {
-        hash: block.hash!,
+        hash: block.hash,
         parentHash: block.header.parentHash,
       };
     }, 'getBlock');
@@ -244,7 +255,6 @@ class QuaiService {
       ]);
 
       // Decode ABI-encoded string responses
-      const abiCoder = quais.AbiCoder.defaultAbiCoder();
       const symbol = abiCoder.decode(['string'], symbolRaw)[0] as string;
       const name = abiCoder.decode(['string'], nameRaw)[0] as string;
       const decimals = Number(abiCoder.decode(['uint8'], decimalsRaw)[0]);
@@ -291,7 +301,6 @@ class QuaiService {
         this.callContract(contractAddress, 'name()'),
       ]);
 
-      const abiCoder = quais.AbiCoder.defaultAbiCoder();
       const symbol = abiCoder.decode(['string'], symbolRaw)[0] as string;
       const name = abiCoder.decode(['string'], nameRaw)[0] as string;
 
@@ -332,7 +341,6 @@ class QuaiService {
         this.callContract(contractAddress, 'name()'),
       ]);
 
-      const abiCoder = quais.AbiCoder.defaultAbiCoder();
       const symbol = abiCoder.decode(['string'], symbolRaw)[0] as string;
       const name = abiCoder.decode(['string'], nameRaw)[0] as string;
 
@@ -353,7 +361,6 @@ class QuaiService {
     // Fallback: call uri(0) to confirm it's an ERC1155 contract.
     // callContract() only handles no-arg signatures, so we encode manually.
     try {
-      const abiCoder = quais.AbiCoder.defaultAbiCoder();
       const selector = quais.id('uri(uint256)').slice(0, 10);
       const encodedArg = abiCoder.encode(['uint256'], [0]);
       const calldata = selector + encodedArg.slice(2);

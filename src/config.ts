@@ -60,7 +60,12 @@ export const config = {
   health: {
     enabled: process.env.HEALTH_CHECK_ENABLED !== 'false',
     port: parseIntWithBounds(process.env.HEALTH_CHECK_PORT, 8080, 1, 65535, 'HEALTH_CHECK_PORT'),
+    host: process.env.HEALTH_CHECK_HOST || '0.0.0.0',
     maxBlocksBehind: parseIntWithBounds(process.env.HEALTH_MAX_BLOCKS_BEHIND, 100, 1, 10000, 'HEALTH_MAX_BLOCKS_BEHIND'),
+    trustedProxies: (process.env.TRUSTED_PROXIES || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
   },
 
   // RPC rate limiting
@@ -72,6 +77,7 @@ export const config = {
   // Caching
   cache: {
     timestampCacheSize: parseIntWithBounds(process.env.TIMESTAMP_CACHE_SIZE, 1000, 10, 100000, 'TIMESTAMP_CACHE_SIZE'),
+    notTokenCacheSize: parseIntWithBounds(process.env.NOT_TOKEN_CACHE_SIZE, 100000, 1000, 1000000, 'NOT_TOKEN_CACHE_SIZE'),
   },
 
   // Circuit breaker

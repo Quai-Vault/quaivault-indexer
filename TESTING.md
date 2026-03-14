@@ -43,6 +43,7 @@ npm run test:coverage
 | `tests/events/vault-core.test.ts` | Core vault event handlers |
 | `tests/events/factory.test.ts` | Factory event handlers |
 | `tests/events/social-recovery.test.ts` | Social recovery event handlers |
+| `tests/events/message-signing.test.ts` | EIP-1271 message signing event handlers |
 | `tests/events/token-transfer.test.ts` | ERC20/ERC721/ERC1155 transfer handling |
 
 ---
@@ -141,7 +142,7 @@ Writes machine-readable results to `tests/e2e/logs/results.json`.
 
 ### Test Coverage
 
-The consolidated test file (`01-full-lifecycle.e2e.test.ts`) covers 21 tests across 13 describe blocks:
+The consolidated test file (`01-full-lifecycle.e2e.test.ts`) covers 26 tests across 14 describe blocks:
 
 | Section | Events Tested |
 |---------|---------------|
@@ -152,7 +153,7 @@ The consolidated test file (`01-full-lifecycle.e2e.test.ts`) covers 21 tests acr
 | Expiration | `TransactionExpired` |
 | Failed External Call | `TransactionFailed` (Option B model) |
 | Owner Management | `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged` |
-| Module Management & Execution | `ModuleEnabled`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `ModuleDisabled` |
+| Module Management & Execution | `EnabledModule`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `DisabledModule` |
 | EIP-1271 Message Signing | `MessageSigned`, `MessageUnsigned` |
 | Execution Delay | `MinExecutionDelayChanged` |
 | Social Recovery | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryCancelled` |
@@ -175,7 +176,7 @@ tests/e2e/
 │   ├── db.ts                    # Database verification helpers (Supabase queries + assertions)
 │   └── indexer.ts               # Indexer health/sync polling
 └── suites/
-    └── 01-full-lifecycle.e2e.test.ts  # All 21 tests in one sequential file
+    └── 01-full-lifecycle.e2e.test.ts  # All 26 tests in one sequential file
 ```
 
 **Key components:**
