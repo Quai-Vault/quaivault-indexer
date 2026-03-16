@@ -13,6 +13,7 @@ vi.mock('../../src/services/supabase.js', () => ({
     addRecoveryApproval: vi.fn().mockResolvedValue(undefined),
     revokeRecoveryApproval: vi.fn().mockResolvedValue(undefined),
     updateRecoveryStatus: vi.fn().mockResolvedValue(undefined),
+    deactivateRecoveryConfig: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -38,6 +39,7 @@ import {
   handleRecoveryExecuted,
   handleRecoveryInvalidated,
   handleRecoveryExpiredEvent,
+  handleRecoveryConfigCleared,
 } from '../../src/events/social-recovery.js';
 import { supabase } from '../../src/services/supabase.js';
 import { quai } from '../../src/services/quai.js';
@@ -317,6 +319,25 @@ describe('social-recovery event handlers', () => {
         '0xWallet',
         '0xHash',
         'expired',
+        300,
+        '0xtx789'
+      );
+    });
+  });
+
+  describe('handleRecoveryConfigCleared', () => {
+    it('deactivates recovery config and guardians', async () => {
+      const event = makeEvent({
+        name: 'RecoveryConfigCleared',
+        args: {
+          wallet: '0xWallet',
+        },
+      });
+
+      await handleRecoveryConfigCleared(event);
+
+      expect(supabase.deactivateRecoveryConfig).toHaveBeenCalledWith(
+        '0xWallet',
         300,
         '0xtx789'
       );

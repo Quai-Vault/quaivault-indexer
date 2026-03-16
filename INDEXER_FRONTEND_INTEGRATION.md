@@ -150,7 +150,7 @@ SELECT rolname, rolconfig FROM pg_roles WHERE rolname = 'authenticator';
 
 | Table | Description | Key Fields |
 |-------|-------------|------------|
-| `wallets` | Deployed multisig wallets | `address`, `threshold`, `owner_count`, `min_execution_delay` |
+| `wallets` | Deployed multisig wallets | `address`, `threshold`, `owner_count`, `min_execution_delay`, `delegatecall_disabled` |
 | `wallet_owners` | Wallet owner addresses | `wallet_address`, `owner_address`, `is_active` |
 | `transactions` | Proposed multisig transactions | `wallet_address`, `tx_hash`, `status`, `confirmation_count`, `executed_by` |
 | `confirmations` | Owner approvals | `wallet_address`, `tx_hash`, `owner_address`, `is_active` |
@@ -171,7 +171,7 @@ SELECT rolname, rolconfig FROM pg_roles WHERE rolname = 'authenticator';
 
 | Table | Description |
 |-------|-------------|
-| `social_recovery_configs` | Recovery configuration (threshold, period) |
+| `social_recovery_configs` | Recovery configuration (threshold, period, `is_active`) |
 | `social_recovery_guardians` | Guardian addresses for recovery |
 | `social_recoveries` | Recovery requests and their status |
 | `social_recovery_approvals` | Guardian approvals for recoveries |
@@ -375,6 +375,7 @@ async function getRecoveryStatus(walletAddress: string) {
       .from('social_recovery_configs')
       .select('*')
       .eq('wallet_address', walletAddress.toLowerCase())
+      .eq('is_active', true)
       .single(),
     supabase
       .from('social_recovery_guardians')
@@ -603,6 +604,7 @@ interface Wallet {
   threshold: number;
   owner_count: number; // managed by DB trigger — starts at 0, auto-incremented as owners are added
   min_execution_delay: number; // seconds before approved tx can execute (0 = immediate)
+  delegatecall_disabled: boolean; // whether module DelegateCall is blocked (default: true)
   created_at_block: number;
   created_at_tx: string;
   created_at: string;
@@ -742,6 +744,7 @@ interface SocialRecoveryConfig {
   wallet_address: string;
   threshold: number;
   recovery_period: number;
+  is_active: boolean; // false after RecoveryConfigCleared (successful recovery execution)
   setup_at_block: number;
   setup_at_tx: string;
   created_at: string;
@@ -822,7 +825,7 @@ The indexer decodes transaction calldata and stores the type in `transaction_typ
 | Type | Description |
 |------|-------------|
 | `transfer` | Native QUAI transfer (no calldata) |
-| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay |
+| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay, setDelegatecallDisabled |
 | `module_config` | setupRecovery, etc. |
 | `recovery_setup` | Social recovery configuration |
 | `message_signing` | signMessage, unsignMessage (EIP-1271) |
@@ -1192,13 +1195,13 @@ async function getTransactionExecutor(walletAddress: string, txHash: string) {
 
 ## Indexed Events Summary
 
-The indexer captures 28 blockchain events from 3 contract sources (plus ERC20/ERC721/ERC1155 Transfer wildcard):
+The indexer captures 30 blockchain events from 3 contract sources (plus ERC20/ERC721/ERC1155 Transfer wildcard):
 
 | Contract | Events |
 |----------|--------|
 | QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
-| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
-| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled`, `RecoveryInvalidated`, `RecoveryExpiredEvent` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `DelegatecallDisabledChanged`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
+| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled`, `RecoveryInvalidated`, `RecoveryExpiredEvent`, `RecoveryConfigCleared` |
 | ERC20/ERC721 | `Transfer` (wildcard scan for auto-discovered tokens) |
 | ERC1155 | `TransferSingle`, `TransferBatch` (wildcard scan for auto-discovered tokens) |
 

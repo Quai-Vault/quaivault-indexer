@@ -28,6 +28,7 @@ import {
   handleTransactionFailed,
   handleTransactionExpired,
   handleMinExecutionDelayChanged,
+  handleDelegatecallDisabledChanged,
 } from './vault-core.js';
 import {
   handleRecoverySetup,
@@ -38,6 +39,7 @@ import {
   handleRecoveryCancelled,
   handleRecoveryInvalidated,
   handleRecoveryExpiredEvent,
+  handleRecoveryConfigCleared,
 } from './social-recovery.js';
 import {
   handleExecutionFromModuleSuccess,
@@ -105,6 +107,9 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
       case 'MinExecutionDelayChanged':
         await handleMinExecutionDelayChanged(event);
         break;
+      case 'DelegatecallDisabledChanged':
+        await handleDelegatecallDisabledChanged(event);
+        break;
 
       // Message signing events (EIP-1271)
       case 'MessageSigned':
@@ -146,6 +151,9 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
         break;
       case 'RecoveryExpiredEvent':
         await handleRecoveryExpiredEvent(event);
+        break;
+      case 'RecoveryConfigCleared':
+        await handleRecoveryConfigCleared(event);
         break;
 
       // Token Transfer events are handled directly by the block processor

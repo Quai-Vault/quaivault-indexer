@@ -20,16 +20,25 @@ const ABI_CONSTANTS = {
   ADDRESS_HEX_LENGTH: 40,          // 20 bytes = 40 hex chars
 };
 
-/** Query minExecutionDelay from a wallet contract and persist if non-zero. */
-async function queryAndStoreDelay(wallet: string): Promise<void> {
+/** Query minExecutionDelay from a wallet contract, returning 0 on failure. */
+async function queryDelay(wallet: string): Promise<number> {
   try {
     const delayHex = await quai.callContract(wallet, 'minExecutionDelay()');
-    const delay = safeParseHex(delayHex, 'minExecutionDelay');
-    if (delay > 0) {
-      await supabase.updateWalletDelay(wallet, delay);
-    }
+    return safeParseHex(delayHex, 'minExecutionDelay');
   } catch (err) {
     logger.debug({ err, wallet }, 'Could not query minExecutionDelay (may be 0)');
+    return 0;
+  }
+}
+
+/** Query delegatecallDisabled from a wallet contract, defaulting to true. */
+async function queryDelegatecallDisabled(wallet: string): Promise<boolean> {
+  try {
+    const resultHex = await quai.callContract(wallet, 'delegatecallDisabled()');
+    return safeParseHex(resultHex, 'delegatecallDisabled') !== 0;
+  } catch (err) {
+    logger.debug({ err, wallet }, 'Could not query delegatecallDisabled, defaulting to true');
+    return true;
   }
 }
 
@@ -44,12 +53,19 @@ export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
     threshold: string;
   }>(event.args, ['wallet', 'owners', 'threshold'], 'WalletCreated');
 
+  const [minDelay, delegatecallDisabled] = await Promise.all([
+    queryDelay(wallet),
+    queryDelegatecallDisabled(wallet),
+  ]);
+
   await supabase.upsertWallet({
     address: wallet,
     threshold: safeParseInt(threshold, 'WalletCreated.threshold'),
     ownerCount: 0,
     createdAtBlock: event.blockNumber,
     createdAtTx: event.transactionHash,
+    minExecutionDelay: minDelay,
+    delegatecallDisabled,
   });
 
   await supabase.addOwnersBatch(
@@ -62,8 +78,6 @@ export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
     }))
   );
 
-  await queryAndStoreDelay(wallet);
-
   logger.info({ wallet, owners: owners.length, threshold }, 'Wallet created');
 }
 
@@ -74,9 +88,11 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
   }>(event.args, ['wallet'], 'WalletRegistered');
 
   try {
-    const [owners, threshold] = await Promise.all([
+    const [owners, threshold, minDelay, delegatecallDisabled] = await Promise.all([
       quai.callContract(wallet, 'getOwners()'),
       quai.callContract(wallet, 'threshold()'),
+      queryDelay(wallet),
+      queryDelegatecallDisabled(wallet),
     ]);
 
     const ownerAddresses = decodeAddressArray(owners);
@@ -88,6 +104,8 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
       ownerCount: 0,
       createdAtBlock: event.blockNumber,
       createdAtTx: event.transactionHash,
+      minExecutionDelay: minDelay,
+      delegatecallDisabled,
     });
 
     await supabase.addOwnersBatch(
@@ -99,8 +117,6 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
         isActive: true,
       }))
     );
-
-    await queryAndStoreDelay(wallet);
 
     logger.info({ wallet, owners: ownerAddresses.length, threshold: thresholdValue }, 'Wallet registered');
   } catch (err) {

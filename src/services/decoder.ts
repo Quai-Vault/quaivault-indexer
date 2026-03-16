@@ -27,6 +27,7 @@ export const EVENT_SIGNATURES = {
   DisabledModule: quais.id('DisabledModule(address)'),
   Received: quais.id('Received(address,uint256)'),
   MinExecutionDelayChanged: quais.id('MinExecutionDelayChanged(uint32,uint32)'),
+  DelegatecallDisabledChanged: quais.id('DelegatecallDisabledChanged(bool)'),
   MessageSigned: quais.id('MessageSigned(bytes32,bytes)'),
   MessageUnsigned: quais.id('MessageUnsigned(bytes32,bytes)'),
 
@@ -47,6 +48,7 @@ export const EVENT_SIGNATURES = {
   RecoveryCancelled: quais.id('RecoveryCancelled(address,bytes32)'),
   RecoveryInvalidated: quais.id('RecoveryInvalidated(address,bytes32)'),
   RecoveryExpiredEvent: quais.id('RecoveryExpiredEvent(address,bytes32)'),
+  RecoveryConfigCleared: quais.id('RecoveryConfigCleared(address)'),
 
   // ERC20/ERC721 Transfer (topic only — decoded from raw topics, not via EVENT_ABIS)
   Transfer: quais.id('Transfer(address,address,uint256)'),
@@ -100,6 +102,7 @@ const EVENT_ABIS: Record<string, string[]> = {
   DisabledModule: ['address indexed module'],
   Received: ['address indexed sender', 'uint256 amount'],
   MinExecutionDelayChanged: ['uint32 oldDelay', 'uint32 newDelay'],
+  DelegatecallDisabledChanged: ['bool disabled'],
   MessageSigned: ['bytes32 indexed msgHash', 'bytes data'],
   MessageUnsigned: ['bytes32 indexed msgHash', 'bytes data'],
 
@@ -147,6 +150,7 @@ const EVENT_ABIS: Record<string, string[]> = {
     'address indexed wallet',
     'bytes32 indexed recoveryHash',
   ],
+  RecoveryConfigCleared: ['address indexed wallet'],
 };
 
 // Cached Interface objects for event decoding (avoid re-creating per call)
@@ -259,6 +263,7 @@ export function getSocialRecoveryEventTopics(): string[] {
     EVENT_SIGNATURES.RecoveryCancelled,
     EVENT_SIGNATURES.RecoveryInvalidated,
     EVENT_SIGNATURES.RecoveryExpiredEvent,
+    EVENT_SIGNATURES.RecoveryConfigCleared,
   ];
 }
 
@@ -331,6 +336,11 @@ const FUNCTION_SELECTORS: Record<string, { name: string; abi: string; type: Tran
   [quais.id('setMinExecutionDelay(uint32)').slice(0, 10)]: {
     name: 'setMinExecutionDelay',
     abi: 'function setMinExecutionDelay(uint32 delay)',
+    type: 'wallet_admin',
+  },
+  [quais.id('setDelegatecallDisabled(bool)').slice(0, 10)]: {
+    name: 'setDelegatecallDisabled',
+    abi: 'function setDelegatecallDisabled(bool disabled)',
     type: 'wallet_admin',
   },
 
@@ -582,6 +592,8 @@ export function getTransactionDescription(decoded: DecodedCalldata): string {
       return `Cancel transaction by consensus: ${args.txHash}`;
     case 'setMinExecutionDelay':
       return `Set minimum execution delay to ${args.delay}`;
+    case 'setDelegatecallDisabled':
+      return `${args.disabled === 'true' ? 'Disable' : 'Enable'} module DelegateCall operations`;
     case 'setupRecovery':
       return `Setup recovery with ${(args.guardians as string[]).length} guardians`;
     // Zodiac module execution functions

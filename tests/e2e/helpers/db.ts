@@ -10,6 +10,7 @@ export interface WalletRecord {
   threshold: number;
   owner_count: number;
   min_execution_delay?: number;
+  delegatecall_disabled: boolean;
   created_at_block: number;
   created_at_tx: string;
   created_at: string;
@@ -114,6 +115,7 @@ export interface SocialRecoveryConfigRecord {
   recovery_period: number;
   setup_at_block: number;
   setup_at_tx: string;
+  is_active: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -604,6 +606,29 @@ export class DatabaseVerifier {
     const wallet = await this.getWallet(walletAddress);
     expect(wallet).not.toBeNull();
     expect(wallet!.min_execution_delay).toBe(expectedDelay);
+  }
+
+  async verifyDelegatecallDisabled(walletAddress: string, expected: boolean): Promise<void> {
+    const wallet = await this.getWallet(walletAddress);
+    expect(wallet).not.toBeNull();
+    expect(wallet!.delegatecall_disabled).toBe(expected);
+  }
+
+  async verifyRecoveryConfigDeactivated(walletAddress: string): Promise<void> {
+    const { data: config, error: configError } = await this.supabase
+      .from('social_recovery_configs')
+      .select('is_active')
+      .eq('wallet_address', walletAddress.toLowerCase())
+      .maybeSingle();
+
+    if (configError) throw configError;
+    if (config) {
+      expect(config.is_active).toBe(false);
+    }
+
+    const guardians = await this.getSocialRecoveryGuardians(walletAddress);
+    const activeGuardians = guardians.filter((g) => g.is_active);
+    expect(activeGuardians).toHaveLength(0);
   }
 
   // ============================================

@@ -29,6 +29,8 @@ export interface Wallet {
   ownerCount: number;
   createdAtBlock: number;
   createdAtTx: string;
+  minExecutionDelay?: number;
+  delegatecallDisabled?: boolean;
 }
 
 export interface WalletOwner {

@@ -222,13 +222,14 @@ export class ContractHelper {
   private async mineSalt(
     owners: string[],
     threshold: number,
-    minExecutionDelay: number = 0
+    minExecutionDelay: number = 0,
+    delegatecallDisabled: boolean = true
   ): Promise<{ salt: string; expectedAddress: string }> {
     const senderAddress = this.ownerWallets[0].address;
 
-    // Encode the initialization data for QuaiVault.initialize(owners, threshold, minExecutionDelay)
+    // Encode the initialization data for QuaiVault.initialize(owners, threshold, minExecutionDelay, delegatecallDisabled)
     const vaultIface = new quais.Interface(QuaiVaultABI);
-    const initData = vaultIface.encodeFunctionData('initialize', [owners, threshold, minExecutionDelay]);
+    const initData = vaultIface.encodeFunctionData('initialize', [owners, threshold, minExecutionDelay, delegatecallDisabled]);
 
     // Encode constructor arguments for QuaiVaultProxy(implementation, initData)
     const encodedArgs = quais.AbiCoder.defaultAbiCoder().encode(
@@ -285,9 +286,9 @@ export class ContractHelper {
    * Includes retry logic for intermittent "Access list creation failed" errors
    * @returns The deployed wallet address
    */
-  async deployWallet(owners: string[], threshold: number): Promise<string> {
+  async deployWallet(owners: string[], threshold: number, delegatecallDisabled: boolean = true): Promise<string> {
     // Mine a salt that produces a valid address for cyprus1 shard (0x00 prefix)
-    const { salt, expectedAddress } = await this.mineSalt(owners, threshold);
+    const { salt, expectedAddress } = await this.mineSalt(owners, threshold, 0, delegatecallDisabled);
 
     console.log(`    Calling createWallet with ${owners.length} owners, threshold ${threshold}`);
     console.log(`    Mined salt: ${salt}`);
@@ -309,11 +310,22 @@ export class ContractHelper {
 
         // Use explicit method signature for CREATE2 deployment
         console.log(`    Sending transaction... (attempt ${attempt}/${MAX_RETRIES})`);
-        tx = await this.quaiVaultFactory.createWallet(
-          owners,
-          threshold,
-          salt
-        );
+        if (!delegatecallDisabled) {
+          // Use 5-param overload for non-default delegatecallDisabled value
+          tx = await this.quaiVaultFactory['createWallet(address[],uint256,bytes32,uint32,bool)'](
+            owners,
+            threshold,
+            salt,
+            0,
+            delegatecallDisabled
+          );
+        } else {
+          tx = await this.quaiVaultFactory.createWallet(
+            owners,
+            threshold,
+            salt
+          );
+        }
         console.log(`    Transaction sent: ${tx.hash}`);
         break; // Success, exit retry loop
       } catch (error: unknown) {

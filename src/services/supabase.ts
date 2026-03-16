@@ -94,6 +94,8 @@ class SupabaseService {
       { table: 'signed_messages', column: 'signed_at_block' },
       { table: 'social_recovery_approvals', column: 'approved_at_block' },
       { table: 'confirmations', column: 'confirmed_at_block' },
+      { table: 'social_recovery_configs', column: 'setup_at_block' },
+      { table: 'social_recovery_guardians', column: 'added_at_block' },
     ];
     for (const { table, column } of tables) {
       const { error } = await this.client.from(table).delete().gt(column, blockNumber);
@@ -144,6 +146,8 @@ class SupabaseService {
           owner_count: wallet.ownerCount,
           created_at_block: wallet.createdAtBlock,
           created_at_tx: createdAtTx,
+          min_execution_delay: wallet.minExecutionDelay ?? 0,
+          delegatecall_disabled: wallet.delegatecallDisabled ?? true,
         },
         {
           onConflict: 'address',
@@ -173,6 +177,8 @@ class SupabaseService {
       ownerCount: data.owner_count,
       createdAtBlock: data.created_at_block,
       createdAtTx: data.created_at_tx,
+      minExecutionDelay: data.min_execution_delay,
+      delegatecallDisabled: data.delegatecall_disabled,
     };
   }
 
@@ -455,6 +461,19 @@ class SupabaseService {
     }, { maxAttempts: 3, delayMs: 1000, operation: 'updateWalletDelay' });
   }
 
+  async updateWalletDelegatecallDisabled(address: string, disabled: boolean): Promise<void> {
+    const normalizedAddress = validateAndNormalizeAddress(address, 'address');
+
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('wallets')
+        .update({ delegatecall_disabled: disabled })
+        .eq('address', normalizedAddress);
+
+      if (error) this.fail('updateWalletDelegatecallDisabled', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'updateWalletDelegatecallDisabled' });
+  }
+
   // ============================================
   // CONFIRMATIONS
   // ============================================
@@ -668,6 +687,7 @@ class SupabaseService {
       .from('social_recovery_configs')
       .select('threshold, recovery_period')
       .eq('wallet_address', normalizedWallet)
+      .eq('is_active', true)
       .single();
 
     if (error && error.code !== 'PGRST116') this.fail('getRecoveryConfig', error);
@@ -677,6 +697,20 @@ class SupabaseService {
       threshold: data.threshold,
       recoveryPeriod: data.recovery_period,
     };
+  }
+
+  async deactivateRecoveryConfig(walletAddress: string, atBlock: number, atTx: string): Promise<void> {
+    const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
+    const normalizedTx = validateBytes32(atTx, 'atTx');
+
+    await withRetry(async () => {
+      const { error } = await this.client.rpc('deactivate_recovery_config_atomic', {
+        p_wallet: normalizedWallet,
+        p_at_block: atBlock,
+        p_at_tx: normalizedTx,
+      });
+      if (error) this.fail('deactivateRecoveryConfig', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'deactivateRecoveryConfig' });
   }
 
   // ============================================

@@ -276,6 +276,7 @@ BEGIN
             created_at_block BIGINT NOT NULL,
             created_at_tx TEXT NOT NULL,
             min_execution_delay INTEGER DEFAULT 0,
+            delegatecall_disabled BOOLEAN NOT NULL DEFAULT true,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )', schema_name);
@@ -427,6 +428,7 @@ BEGIN
             recovery_period BIGINT NOT NULL,
             setup_at_block BIGINT NOT NULL,
             setup_at_tx TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(wallet_address)
@@ -566,7 +568,9 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_wallet_modules_active ON %I.wallet_modules(wallet_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_deposits_wallet ON %I.deposits(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_configs_wallet ON %I.social_recovery_configs(wallet_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_configs_active ON %I.social_recovery_configs(wallet_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_guardians_wallet ON %I.social_recovery_guardians(wallet_address)', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_guardians_active ON %I.social_recovery_guardians(wallet_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recoveries_wallet ON %I.social_recoveries(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recoveries_pending ON %I.social_recoveries(wallet_address) WHERE status = ''pending''', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_approvals_recovery ON %I.social_recovery_approvals(wallet_address, recovery_hash)', schema_name);
@@ -671,13 +675,14 @@ BEGIN
         )
         RETURNS void AS $func$
         BEGIN
-            INSERT INTO %I.social_recovery_configs (wallet_address, threshold, recovery_period, setup_at_block, setup_at_tx)
-            VALUES (p_wallet, p_threshold, p_recovery_period, p_setup_at_block, p_setup_at_tx)
+            INSERT INTO %I.social_recovery_configs (wallet_address, threshold, recovery_period, setup_at_block, setup_at_tx, is_active)
+            VALUES (p_wallet, p_threshold, p_recovery_period, p_setup_at_block, p_setup_at_tx, TRUE)
             ON CONFLICT (wallet_address) DO UPDATE SET
                 threshold = EXCLUDED.threshold,
                 recovery_period = EXCLUDED.recovery_period,
                 setup_at_block = EXCLUDED.setup_at_block,
-                setup_at_tx = EXCLUDED.setup_at_tx;
+                setup_at_tx = EXCLUDED.setup_at_tx,
+                is_active = TRUE;
 
             UPDATE %I.social_recovery_guardians SET is_active = FALSE WHERE wallet_address = p_wallet;
 
@@ -692,6 +697,27 @@ BEGIN
         END;
         $func$ LANGUAGE plpgsql
     ', schema_name, schema_name, schema_name, schema_name);
+
+    -- Atomic recovery config deactivation stored procedure.
+    -- In a single transaction: deactivates config and all active guardians for a wallet.
+    EXECUTE format('
+        CREATE OR REPLACE FUNCTION %I.deactivate_recovery_config_atomic(
+            p_wallet TEXT,
+            p_at_block BIGINT,
+            p_at_tx TEXT
+        )
+        RETURNS void AS $func$
+        BEGIN
+            UPDATE %I.social_recovery_configs
+            SET is_active = FALSE
+            WHERE wallet_address = p_wallet AND is_active = TRUE;
+
+            UPDATE %I.social_recovery_guardians
+            SET is_active = FALSE, removed_at_block = p_at_block, removed_at_tx = p_at_tx
+            WHERE wallet_address = p_wallet AND is_active = TRUE;
+        END;
+        $func$ LANGUAGE plpgsql
+    ', schema_name, schema_name, schema_name);
 
     -- Distinct token addresses for a wallet (for frontend token discovery at scale)
     EXECUTE format('

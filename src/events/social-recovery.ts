@@ -1,6 +1,7 @@
 /**
  * Social recovery event handlers: RecoverySetup, RecoveryInitiated,
- * RecoveryApproved, RecoveryApprovalRevoked, RecoveryExecuted, RecoveryCancelled
+ * RecoveryApproved, RecoveryApprovalRevoked, RecoveryExecuted, RecoveryCancelled,
+ * RecoveryInvalidated, RecoveryExpiredEvent, RecoveryConfigCleared
  */
 
 import type { DecodedEvent } from '../types/index.js';
@@ -217,4 +218,14 @@ export async function handleRecoveryExpiredEvent(event: DecodedEvent): Promise<v
     { wallet, recoveryHash },
     'Recovery expired'
   );
+}
+
+export async function handleRecoveryConfigCleared(event: DecodedEvent): Promise<void> {
+  const { wallet } = validateEventArgs<{
+    wallet: string;
+  }>(event.args, ['wallet'], 'RecoveryConfigCleared');
+
+  await supabase.deactivateRecoveryConfig(wallet, event.blockNumber, event.transactionHash);
+
+  logger.info({ wallet }, 'Recovery config cleared — guardians deactivated');
 }

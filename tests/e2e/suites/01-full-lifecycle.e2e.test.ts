@@ -120,13 +120,15 @@ function mineSalt(
   implementationAddress: string,
   owners: string[],
   threshold: number,
-  minExecutionDelay: number = 0
+  minExecutionDelay: number = 0,
+  delegatecallDisabled: boolean = true
 ): { salt: string; expectedAddress: string } {
   const walletIface = new quais.Interface(QuaiVaultABI);
   const initData = walletIface.encodeFunctionData('initialize', [
     owners,
     threshold,
     minExecutionDelay,
+    delegatecallDisabled,
   ]);
   const abiCoder = quais.AbiCoder.defaultAbiCoder();
   const constructorArgs = abiCoder.encode(
@@ -1249,6 +1251,49 @@ describe('E2E Indexer Full Lifecycle (Orchard Testnet)', () => {
       );
       await db.verifyMinExecutionDelay(walletAddress, 0);
       console.log('  ✓ MinExecutionDelayChanged indexed (reset to 0)');
+    });
+  });
+
+  // ==========================================================================
+  // DelegatecallDisabledChanged (CR-1)
+  // ==========================================================================
+
+  describe('DelegatecallDisabledChanged', () => {
+    it('should index default delegatecall_disabled=true on wallet creation', async () => {
+      await db.verifyDelegatecallDisabled(walletAddress, true);
+      console.log('  ✓ delegatecall_disabled=true on primary wallet');
+    });
+
+    it('should index DelegatecallDisabledChanged when toggled to false', async () => {
+      const data = walletIface.encodeFunctionData('setDelegatecallDisabled', [false]);
+      await executeSelfCall(wallet, walletAddress, data, [owner1, owner2, owner3], THRESHOLD);
+
+      await indexer.waitUntil(
+        async () => {
+          const w = await db.getWallet(walletAddress);
+          return w?.delegatecall_disabled === false ? w : null;
+        },
+        'delegatecall_disabled toggled to false',
+        e2eConfig.txConfirmationTimeout
+      );
+      await db.verifyDelegatecallDisabled(walletAddress, false);
+      console.log('  ✓ DelegatecallDisabledChanged indexed (set to false)');
+    });
+
+    it('should index DelegatecallDisabledChanged when toggled back to true', async () => {
+      const data = walletIface.encodeFunctionData('setDelegatecallDisabled', [true]);
+      await executeSelfCall(wallet, walletAddress, data, [owner1, owner2, owner3], THRESHOLD);
+
+      await indexer.waitUntil(
+        async () => {
+          const w = await db.getWallet(walletAddress);
+          return w?.delegatecall_disabled === true ? w : null;
+        },
+        'delegatecall_disabled toggled back to true',
+        e2eConfig.txConfirmationTimeout
+      );
+      await db.verifyDelegatecallDisabled(walletAddress, true);
+      console.log('  ✓ DelegatecallDisabledChanged indexed (reset to true)');
     });
   });
 

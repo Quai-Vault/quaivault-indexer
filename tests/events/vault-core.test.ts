@@ -16,6 +16,7 @@ vi.mock('../../src/services/supabase.js', () => ({
     revokeConfirmation: vi.fn().mockResolvedValue(undefined),
     getTokenByAddress: vi.fn().mockResolvedValue(null),
     upsertToken: vi.fn().mockResolvedValue(undefined),
+    updateWalletDelegatecallDisabled: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -40,6 +41,7 @@ import {
   handleTransactionProposed,
   handleTransactionApproved,
   handleTransactionExecuted,
+  handleDelegatecallDisabledChanged,
 } from '../../src/events/vault-core.js';
 import { supabase } from '../../src/services/supabase.js';
 
@@ -136,6 +138,36 @@ describe('vault-core event handlers', () => {
           executed_at_tx: '0xtx456',
           executed_by: '0xExecutor',
         }
+      );
+    });
+  });
+
+  describe('handleDelegatecallDisabledChanged', () => {
+    it('updates delegatecall_disabled to true', async () => {
+      const event = makeEvent({
+        name: 'DelegatecallDisabledChanged',
+        args: { disabled: true },
+      });
+
+      await handleDelegatecallDisabledChanged(event);
+
+      expect(supabase.updateWalletDelegatecallDisabled).toHaveBeenCalledWith(
+        '0xWallet',
+        true
+      );
+    });
+
+    it('updates delegatecall_disabled to false', async () => {
+      const event = makeEvent({
+        name: 'DelegatecallDisabledChanged',
+        args: { disabled: false },
+      });
+
+      await handleDelegatecallDisabledChanged(event);
+
+      expect(supabase.updateWalletDelegatecallDisabled).toHaveBeenCalledWith(
+        '0xWallet',
+        false
       );
     });
   });

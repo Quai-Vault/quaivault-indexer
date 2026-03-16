@@ -31,7 +31,17 @@
   },
   {
     "inputs": [],
+    "name": "DelegateCallDisabled",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "DuplicateOwner",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ExecutionDelayTooLong",
     "type": "error"
   },
   {
@@ -43,6 +53,11 @@
       }
     ],
     "name": "ExpirationTooSoon",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ImplementationSlotTampered",
     "type": "error"
   },
   {
@@ -236,6 +251,19 @@
       }
     ],
     "name": "ApprovalRevoked",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "disabled",
+        "type": "bool"
+      }
+    ],
+    "name": "DelegatecallDisabledChanged",
     "type": "event"
   },
   {
@@ -593,6 +621,19 @@
   },
   {
     "inputs": [],
+    "name": "MAX_EXECUTION_DELAY",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_MODULES",
     "outputs": [
       {
@@ -699,6 +740,19 @@
     "name": "changeThreshold",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "delegatecallDisabled",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1143,6 +1197,11 @@
         "internalType": "uint32",
         "name": "_minExecutionDelay",
         "type": "uint32"
+      },
+      {
+        "internalType": "bool",
+        "name": "_delegatecallDisabled",
+        "type": "bool"
       }
     ],
     "name": "initialize",
@@ -1525,6 +1584,19 @@
       }
     ],
     "name": "revokeApproval",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bool",
+        "name": "disabled",
+        "type": "bool"
+      }
+    ],
+    "name": "setDelegatecallDisabled",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

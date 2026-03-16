@@ -302,3 +302,41 @@ describe('ERC20/ERC721 shared selector disambiguation', () => {
     expect(result.transactionType).toBe('erc721_transfer');
   });
 });
+
+describe('setDelegatecallDisabled calldata decoding', () => {
+  const WALLET = '0x' + 'aa'.repeat(20);
+
+  it('decodes setDelegatecallDisabled(false) as wallet_admin', () => {
+    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
+    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [false]);
+    const result = decodeCalldata(WALLET, calldata, '0');
+    expect(result.transactionType).toBe('wallet_admin');
+    expect(result.decodedParams?.function).toBe('setDelegatecallDisabled');
+    expect(result.decodedParams?.args.disabled).toBe('false');
+  });
+
+  it('decodes setDelegatecallDisabled(true) as wallet_admin', () => {
+    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
+    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [true]);
+    const result = decodeCalldata(WALLET, calldata, '0');
+    expect(result.transactionType).toBe('wallet_admin');
+    expect(result.decodedParams?.function).toBe('setDelegatecallDisabled');
+    expect(result.decodedParams?.args.disabled).toBe('true');
+  });
+
+  it('generates correct description for disabling delegatecall', () => {
+    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
+    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [true]);
+    const result = decodeCalldata(WALLET, calldata, '0');
+    const description = getTransactionDescription(result);
+    expect(description).toBe('Disable module DelegateCall operations');
+  });
+
+  it('generates correct description for enabling delegatecall', () => {
+    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
+    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [false]);
+    const result = decodeCalldata(WALLET, calldata, '0');
+    const description = getTransactionDescription(result);
+    expect(description).toBe('Enable module DelegateCall operations');
+  });
+});

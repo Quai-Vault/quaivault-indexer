@@ -221,6 +221,19 @@
         "internalType": "address",
         "name": "wallet",
         "type": "address"
+      }
+    ],
+    "name": "RecoveryConfigCleared",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "wallet",
+        "type": "address"
       },
       {
         "indexed": true,

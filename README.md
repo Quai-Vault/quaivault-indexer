@@ -4,7 +4,7 @@ A blockchain indexing service for QuaiVault multisig wallets on Quai Network. In
 
 ## Features
 
-- Indexes 28 event types from QuaiVault, Factory, and module contracts (plus ERC20/ERC721/ERC1155 Transfer wildcards)
+- Indexes 30 event types from QuaiVault, Factory, and module contracts (plus ERC20/ERC721/ERC1155 Transfer wildcards)
 - Real-time updates via Supabase Realtime subscriptions
 - Historical backfill with resume capability
 - Transaction type decoding (transfer, wallet_admin, module_config, etc.)
@@ -168,13 +168,13 @@ src/
 | `social_recoveries` | Recovery requests |
 | `social_recovery_approvals` | Guardian approvals |
 
-## Indexed Events (28 + Token Transfer wildcards)
+## Indexed Events (30 + Token Transfer wildcards)
 
 | Contract | Events |
 |----------|--------|
 | QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
-| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
-| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled`, `RecoveryInvalidated`, `RecoveryExpiredEvent` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `DelegatecallDisabledChanged`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
+| SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled`, `RecoveryInvalidated`, `RecoveryExpiredEvent`, `RecoveryConfigCleared` |
 | ERC20/ERC721 | `Transfer` (wildcard scan for auto-discovered tokens) |
 | ERC1155 | `TransferSingle`, `TransferBatch` (wildcard scan for auto-discovered tokens) |
 
@@ -185,7 +185,7 @@ The indexer decodes calldata for proposed transactions:
 | Type | Description |
 |------|-------------|
 | `transfer` | Native QUAI transfer (no data) |
-| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay |
+| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay, setDelegatecallDisabled |
 | `module_config` | setupRecovery, etc. |
 | `recovery_setup` | Social recovery configuration |
 | `message_signing` | signMessage, unsignMessage (EIP-1271) |

@@ -142,7 +142,7 @@ Writes machine-readable results to `tests/e2e/logs/results.json`.
 
 ### Test Coverage
 
-The consolidated test file (`01-full-lifecycle.e2e.test.ts`) covers 26 tests across 14 describe blocks:
+The consolidated test file (`01-full-lifecycle.e2e.test.ts`) covers 30 tests across 15 describe blocks:
 
 | Section | Events Tested |
 |---------|---------------|
@@ -156,7 +156,8 @@ The consolidated test file (`01-full-lifecycle.e2e.test.ts`) covers 26 tests acr
 | Module Management & Execution | `EnabledModule`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `DisabledModule` |
 | EIP-1271 Message Signing | `MessageSigned`, `MessageUnsigned` |
 | Execution Delay | `MinExecutionDelayChanged` |
-| Social Recovery | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryCancelled` |
+| DelegatecallDisabledChanged | `DelegatecallDisabledChanged` (default true, toggle false, toggle true) |
+| Social Recovery | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryCancelled`, `RecoveryConfigCleared` |
 | ERC721 Transfers | Mint inflow, transfer outflow (skip if `MOCK_ERC721` not deployed) |
 | ERC1155 Transfers | Mint inflow, `safeTransferFrom` outflow, batch mint fan-out (skip if `MOCK_ERC1155` not deployed) |
 
@@ -176,7 +177,7 @@ tests/e2e/
 │   ├── db.ts                    # Database verification helpers (Supabase queries + assertions)
 │   └── indexer.ts               # Indexer health/sync polling
 └── suites/
-    └── 01-full-lifecycle.e2e.test.ts  # All 26 tests in one sequential file
+    └── 01-full-lifecycle.e2e.test.ts  # All 30 tests in one sequential file
 ```
 
 **Key components:**

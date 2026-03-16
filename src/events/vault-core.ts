@@ -358,3 +358,22 @@ export async function handleMinExecutionDelayChanged(event: DecodedEvent): Promi
     'Minimum execution delay changed'
   );
 }
+
+export async function handleDelegatecallDisabledChanged(event: DecodedEvent): Promise<void> {
+  const { disabled } = validateEventArgs<{
+    disabled: boolean;
+  }>(event.args, ['disabled'], 'DelegatecallDisabledChanged');
+
+  if (typeof disabled !== 'boolean') {
+    logger.error({ wallet: event.address, disabled, type: typeof disabled },
+      'DelegatecallDisabledChanged: disabled is not a boolean');
+    return;
+  }
+
+  await supabase.updateWalletDelegatecallDisabled(event.address, disabled);
+
+  logger.info(
+    { wallet: event.address, disabled },
+    'DelegateCall disabled flag changed'
+  );
+}
