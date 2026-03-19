@@ -150,16 +150,6 @@
         "internalType": "bytes32",
         "name": "salt",
         "type": "bytes32"
-      },
-      {
-        "internalType": "uint32",
-        "name": "minExecutionDelay",
-        "type": "uint32"
-      },
-      {
-        "internalType": "bool",
-        "name": "delegatecallDisabled",
-        "type": "bool"
       }
     ],
     "name": "createWallet",
@@ -189,6 +179,60 @@
         "internalType": "bytes32",
         "name": "salt",
         "type": "bytes32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "minExecutionDelay",
+        "type": "uint32"
+      },
+      {
+        "internalType": "address[]",
+        "name": "initialModules",
+        "type": "address[]"
+      }
+    ],
+    "name": "createWallet",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "wallet",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address[]",
+        "name": "owners",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "threshold",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "salt",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "minExecutionDelay",
+        "type": "uint32"
+      },
+      {
+        "internalType": "address[]",
+        "name": "initialModules",
+        "type": "address[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "initialDelegatecallTargets",
+        "type": "address[]"
       }
     ],
     "name": "createWallet",
@@ -328,9 +372,14 @@
         "type": "uint32"
       },
       {
-        "internalType": "bool",
-        "name": "delegatecallDisabled",
-        "type": "bool"
+        "internalType": "address[]",
+        "name": "initialModules",
+        "type": "address[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "initialDelegatecallTargets",
+        "type": "address[]"
       }
     ],
     "name": "predictWalletAddress",

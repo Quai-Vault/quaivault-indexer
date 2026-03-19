@@ -96,11 +96,19 @@ class SupabaseService {
       { table: 'confirmations', column: 'confirmed_at_block' },
       { table: 'social_recovery_configs', column: 'setup_at_block' },
       { table: 'social_recovery_guardians', column: 'added_at_block' },
+      { table: 'wallet_delegatecall_targets', column: 'added_at_block' },
     ];
     for (const { table, column } of tables) {
       const { error } = await this.client.from(table).delete().gt(column, blockNumber);
       if (error) logger.error({ err: error, table, blockNumber }, 'Reorg cleanup failed for table');
     }
+
+    // Revert target removals that occurred in rolled-back blocks
+    const { error: revertError } = await this.client
+      .from('wallet_delegatecall_targets')
+      .update({ is_active: true, removed_at_block: null, removed_at_tx: null })
+      .gt('removed_at_block', blockNumber);
+    if (revertError) logger.error({ err: revertError, blockNumber }, 'Reorg cleanup failed for delegatecall target removals');
   }
 
   async updateIndexerState(blockNumber: number, blockHash?: string): Promise<void> {
@@ -147,7 +155,6 @@ class SupabaseService {
           created_at_block: wallet.createdAtBlock,
           created_at_tx: createdAtTx,
           min_execution_delay: wallet.minExecutionDelay ?? 0,
-          delegatecall_disabled: wallet.delegatecallDisabled ?? true,
         },
         {
           onConflict: 'address',
@@ -178,7 +185,6 @@ class SupabaseService {
       createdAtBlock: data.created_at_block,
       createdAtTx: data.created_at_tx,
       minExecutionDelay: data.min_execution_delay,
-      delegatecallDisabled: data.delegatecall_disabled,
     };
   }
 
@@ -461,17 +467,68 @@ class SupabaseService {
     }, { maxAttempts: 3, delayMs: 1000, operation: 'updateWalletDelay' });
   }
 
-  async updateWalletDelegatecallDisabled(address: string, disabled: boolean): Promise<void> {
-    const normalizedAddress = validateAndNormalizeAddress(address, 'address');
+  // ============================================
+  // DELEGATECALL TARGETS
+  // ============================================
+
+  async addDelegatecallTarget(
+    walletAddress: string,
+    targetAddress: string,
+    addedAtBlock: number,
+    addedAtTx: string
+  ): Promise<void> {
+    const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
+    const normalizedTarget = validateAndNormalizeAddress(targetAddress, 'targetAddress');
+    const normalizedTx = validateBytes32(addedAtTx, 'addedAtTx');
 
     await withRetry(async () => {
-      const { error } = await this.client
-        .from('wallets')
-        .update({ delegatecall_disabled: disabled })
-        .eq('address', normalizedAddress);
+      const { error } = await this.client.from('wallet_delegatecall_targets').upsert(
+        {
+          wallet_address: normalizedWallet,
+          target_address: normalizedTarget,
+          added_at_block: addedAtBlock,
+          added_at_tx: normalizedTx,
+          removed_at_block: null,
+          removed_at_tx: null,
+          is_active: true,
+        },
+        { onConflict: 'wallet_address,target_address' }
+      );
 
-      if (error) this.fail('updateWalletDelegatecallDisabled', error);
-    }, { maxAttempts: 3, delayMs: 1000, operation: 'updateWalletDelegatecallDisabled' });
+      if (error) this.fail('addDelegatecallTarget', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'addDelegatecallTarget' });
+  }
+
+  async removeDelegatecallTarget(
+    walletAddress: string,
+    targetAddress: string,
+    removedAtBlock: number,
+    removedAtTx: string
+  ): Promise<void> {
+    const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
+    const normalizedTarget = validateAndNormalizeAddress(targetAddress, 'targetAddress');
+    const normalizedTx = validateBytes32(removedAtTx, 'removedAtTx');
+
+    await withRetry(async () => {
+      const { error, count } = await this.client
+        .from('wallet_delegatecall_targets')
+        .update({
+          is_active: false,
+          removed_at_block: removedAtBlock,
+          removed_at_tx: normalizedTx,
+        })
+        .eq('wallet_address', normalizedWallet)
+        .eq('target_address', normalizedTarget)
+        .eq('is_active', true);
+
+      if (error) this.fail('removeDelegatecallTarget', error);
+      if (count === 0) {
+        logger.warn(
+          { wallet: normalizedWallet, target: normalizedTarget },
+          'removeDelegatecallTarget: no active row found to deactivate'
+        );
+      }
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'removeDelegatecallTarget' });
   }
 
   // ============================================

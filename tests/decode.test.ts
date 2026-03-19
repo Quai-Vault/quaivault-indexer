@@ -303,40 +303,41 @@ describe('ERC20/ERC721 shared selector disambiguation', () => {
   });
 });
 
-describe('setDelegatecallDisabled calldata decoding', () => {
+describe('delegatecall target calldata decoding', () => {
   const WALLET = '0x' + 'aa'.repeat(20);
+  const TARGET = '0x' + 'bb'.repeat(20);
 
-  it('decodes setDelegatecallDisabled(false) as wallet_admin', () => {
-    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
-    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [false]);
+  it('decodes addDelegatecallTarget as wallet_admin', () => {
+    const iface = new quais.Interface(['function addDelegatecallTarget(address target)']);
+    const calldata = iface.encodeFunctionData('addDelegatecallTarget', [TARGET]);
     const result = decodeCalldata(WALLET, calldata, '0');
     expect(result.transactionType).toBe('wallet_admin');
-    expect(result.decodedParams?.function).toBe('setDelegatecallDisabled');
-    expect(result.decodedParams?.args.disabled).toBe('false');
+    expect(result.decodedParams?.function).toBe('addDelegatecallTarget');
+    expect(result.decodedParams?.args.target?.toString().toLowerCase()).toBe(TARGET.toLowerCase());
   });
 
-  it('decodes setDelegatecallDisabled(true) as wallet_admin', () => {
-    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
-    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [true]);
+  it('decodes removeDelegatecallTarget as wallet_admin', () => {
+    const iface = new quais.Interface(['function removeDelegatecallTarget(address target)']);
+    const calldata = iface.encodeFunctionData('removeDelegatecallTarget', [TARGET]);
     const result = decodeCalldata(WALLET, calldata, '0');
     expect(result.transactionType).toBe('wallet_admin');
-    expect(result.decodedParams?.function).toBe('setDelegatecallDisabled');
-    expect(result.decodedParams?.args.disabled).toBe('true');
+    expect(result.decodedParams?.function).toBe('removeDelegatecallTarget');
+    expect(result.decodedParams?.args.target?.toString().toLowerCase()).toBe(TARGET.toLowerCase());
   });
 
-  it('generates correct description for disabling delegatecall', () => {
-    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
-    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [true]);
+  it('generates correct description for adding target', () => {
+    const iface = new quais.Interface(['function addDelegatecallTarget(address target)']);
+    const calldata = iface.encodeFunctionData('addDelegatecallTarget', [TARGET]);
     const result = decodeCalldata(WALLET, calldata, '0');
     const description = getTransactionDescription(result);
-    expect(description).toBe('Disable module DelegateCall operations');
+    expect(description.toLowerCase()).toContain('add delegatecall target:');
   });
 
-  it('generates correct description for enabling delegatecall', () => {
-    const iface = new quais.Interface(['function setDelegatecallDisabled(bool disabled)']);
-    const calldata = iface.encodeFunctionData('setDelegatecallDisabled', [false]);
+  it('generates correct description for removing target', () => {
+    const iface = new quais.Interface(['function removeDelegatecallTarget(address target)']);
+    const calldata = iface.encodeFunctionData('removeDelegatecallTarget', [TARGET]);
     const result = decodeCalldata(WALLET, calldata, '0');
     const description = getTransactionDescription(result);
-    expect(description).toBe('Enable module DelegateCall operations');
+    expect(description.toLowerCase()).toContain('remove delegatecall target:');
   });
 });

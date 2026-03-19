@@ -30,8 +30,36 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "DelegateCallDisabled",
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
+      }
+    ],
+    "name": "DelegateCallNotAllowed",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
+      }
+    ],
+    "name": "DelegatecallTargetAlreadyAllowed",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
+      }
+    ],
+    "name": "DelegatecallTargetNotAllowed",
     "type": "error"
   },
   {
@@ -257,13 +285,26 @@
     "anonymous": false,
     "inputs": [
       {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "disabled",
-        "type": "bool"
+        "indexed": true,
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
       }
     ],
-    "name": "DelegatecallDisabledChanged",
+    "name": "DelegatecallTargetAdded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
+      }
+    ],
+    "name": "DelegatecallTargetRemoved",
     "type": "event"
   },
   {
@@ -662,6 +703,19 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "target",
+        "type": "address"
+      }
+    ],
+    "name": "addDelegatecallTarget",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "owner",
         "type": "address"
       }
@@ -743,8 +797,14 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "delegatecallDisabled",
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "delegatecallAllowed",
     "outputs": [
       {
         "internalType": "bool",
@@ -1199,9 +1259,14 @@
         "type": "uint32"
       },
       {
-        "internalType": "bool",
-        "name": "_delegatecallDisabled",
-        "type": "bool"
+        "internalType": "address[]",
+        "name": "_initialModules",
+        "type": "address[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "_initialDelegatecallTargets",
+        "type": "address[]"
       }
     ],
     "name": "initialize",
@@ -1566,6 +1631,19 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "target",
+        "type": "address"
+      }
+    ],
+    "name": "removeDelegatecallTarget",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "owner",
         "type": "address"
       }
@@ -1584,19 +1662,6 @@
       }
     ],
     "name": "revokeApproval",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bool",
-        "name": "disabled",
-        "type": "bool"
-      }
-    ],
-    "name": "setDelegatecallDisabled",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

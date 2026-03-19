@@ -156,7 +156,7 @@ The consolidated test file (`01-full-lifecycle.e2e.test.ts`) covers 30 tests acr
 | Module Management & Execution | `EnabledModule`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `DisabledModule` |
 | EIP-1271 Message Signing | `MessageSigned`, `MessageUnsigned` |
 | Execution Delay | `MinExecutionDelayChanged` |
-| DelegatecallDisabledChanged | `DelegatecallDisabledChanged` (default true, toggle false, toggle true) |
+| DelegatecallTarget Add/Remove | `DelegatecallTargetAdded`, `DelegatecallTargetRemoved` (add target, verify active, remove target, verify inactive) |
 | Social Recovery | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryCancelled`, `RecoveryConfigCleared` |
 | ERC721 Transfers | Mint inflow, transfer outflow (skip if `MOCK_ERC721` not deployed) |
 | ERC1155 Transfers | Mint inflow, `safeTransferFrom` outflow, batch mint fan-out (skip if `MOCK_ERC1155` not deployed) |

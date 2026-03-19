@@ -16,7 +16,8 @@ vi.mock('../../src/services/supabase.js', () => ({
     revokeConfirmation: vi.fn().mockResolvedValue(undefined),
     getTokenByAddress: vi.fn().mockResolvedValue(null),
     upsertToken: vi.fn().mockResolvedValue(undefined),
-    updateWalletDelegatecallDisabled: vi.fn().mockResolvedValue(undefined),
+    addDelegatecallTarget: vi.fn().mockResolvedValue(undefined),
+    removeDelegatecallTarget: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -41,7 +42,8 @@ import {
   handleTransactionProposed,
   handleTransactionApproved,
   handleTransactionExecuted,
-  handleDelegatecallDisabledChanged,
+  handleDelegatecallTargetAdded,
+  handleDelegatecallTargetRemoved,
 } from '../../src/events/vault-core.js';
 import { supabase } from '../../src/services/supabase.js';
 
@@ -142,32 +144,38 @@ describe('vault-core event handlers', () => {
     });
   });
 
-  describe('handleDelegatecallDisabledChanged', () => {
-    it('updates delegatecall_disabled to true', async () => {
+  describe('handleDelegatecallTargetAdded', () => {
+    it('adds delegatecall target', async () => {
       const event = makeEvent({
-        name: 'DelegatecallDisabledChanged',
-        args: { disabled: true },
+        name: 'DelegatecallTargetAdded',
+        args: { target: '0xTargetAddress' },
       });
 
-      await handleDelegatecallDisabledChanged(event);
+      await handleDelegatecallTargetAdded(event);
 
-      expect(supabase.updateWalletDelegatecallDisabled).toHaveBeenCalledWith(
+      expect(supabase.addDelegatecallTarget).toHaveBeenCalledWith(
         '0xWallet',
-        true
+        '0xTargetAddress',
+        200,
+        '0xtx456'
       );
     });
+  });
 
-    it('updates delegatecall_disabled to false', async () => {
+  describe('handleDelegatecallTargetRemoved', () => {
+    it('removes delegatecall target', async () => {
       const event = makeEvent({
-        name: 'DelegatecallDisabledChanged',
-        args: { disabled: false },
+        name: 'DelegatecallTargetRemoved',
+        args: { target: '0xTargetAddress' },
       });
 
-      await handleDelegatecallDisabledChanged(event);
+      await handleDelegatecallTargetRemoved(event);
 
-      expect(supabase.updateWalletDelegatecallDisabled).toHaveBeenCalledWith(
+      expect(supabase.removeDelegatecallTarget).toHaveBeenCalledWith(
         '0xWallet',
-        false
+        '0xTargetAddress',
+        200,
+        '0xtx456'
       );
     });
   });

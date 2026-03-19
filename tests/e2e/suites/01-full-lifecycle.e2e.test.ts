@@ -121,14 +121,16 @@ function mineSalt(
   owners: string[],
   threshold: number,
   minExecutionDelay: number = 0,
-  delegatecallDisabled: boolean = true
+  initialModules: string[] = [],
+  initialDelegatecallTargets: string[] = []
 ): { salt: string; expectedAddress: string } {
   const walletIface = new quais.Interface(QuaiVaultABI);
   const initData = walletIface.encodeFunctionData('initialize', [
     owners,
     threshold,
     minExecutionDelay,
-    delegatecallDisabled,
+    initialModules,
+    initialDelegatecallTargets,
   ]);
   const abiCoder = quais.AbiCoder.defaultAbiCoder();
   const constructorArgs = abiCoder.encode(
@@ -1255,45 +1257,156 @@ describe('E2E Indexer Full Lifecycle (Orchard Testnet)', () => {
   });
 
   // ==========================================================================
-  // DelegatecallDisabledChanged (CR-1)
+  // DelegatecallTarget Add/Remove (whitelist)
   // ==========================================================================
 
-  describe('DelegatecallDisabledChanged', () => {
-    it('should index default delegatecall_disabled=true on wallet creation', async () => {
-      await db.verifyDelegatecallDisabled(walletAddress, true);
-      console.log('  ✓ delegatecall_disabled=true on primary wallet');
+  describe('DelegatecallTarget Add/Remove', () => {
+    let dcWalletAddress: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let dcWallet: any;
+    let multiSendCallOnlyAddress: string;
+
+    it('should index initial modules and delegatecall targets from wallet creation', async () => {
+      if (!e2eConfig.multiSendCallOnlyAddress) {
+        console.log('  ⏭️ MultiSendCallOnly not configured — skipping');
+        return;
+      }
+      if (!e2eConfig.socialRecoveryModuleAddress) {
+        console.log('  ⏭️ SocialRecoveryModule not configured — skipping');
+        return;
+      }
+      multiSendCallOnlyAddress = e2eConfig.multiSendCallOnlyAddress;
+      const moduleAddress = e2eConfig.socialRecoveryModuleAddress;
+
+      // Deploy a wallet with initialModules AND initialDelegatecallTargets
+      const { salt } = mineSalt(
+        factoryAddress,
+        owner1.address,
+        implementationAddress,
+        ownerAddresses,
+        THRESHOLD,
+        0,
+        [moduleAddress],
+        [multiSendCallOnlyAddress]
+      );
+
+      const createReceipt = await withRetry(async () => {
+        await warmup();
+        const createTx = await factory['createWallet(address[],uint256,bytes32,uint32,address[],address[])'](
+          ownerAddresses,
+          THRESHOLD,
+          salt,
+          0,
+          [moduleAddress],
+          [multiSendCallOnlyAddress]
+        );
+        return await waitForTx(createTx, 'createWallet with modules + targets');
+      }, 'createWalletWithModulesAndTargets');
+
+      let addr = '';
+      for (const log of createReceipt.logs) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const parsed = factory.interface.parseLog(log as any);
+          if (parsed?.name === 'WalletCreated') {
+            addr = parsed.args.wallet || parsed.args[0];
+            break;
+          }
+        } catch {
+          // skip non-matching logs
+        }
+      }
+      if (!addr) throw new Error('WalletCreated event not found');
+
+      dcWalletAddress = addr;
+      dcWallet = new quais.Contract(dcWalletAddress, QuaiVaultABI, owner1);
+
+      // Fund the wallet
+      await withRetry(async () => {
+        await warmup();
+        const toAddress = quais.getAddress(dcWalletAddress);
+        const fundTx = await owner1.sendTransaction({
+          from: owner1.address,
+          to: toAddress,
+          value: quais.parseQuai('5'),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any);
+        await waitForTx(fundTx, 'fundWallet');
+      }, 'fundDcWallet');
+
+      // Wait for indexer to process the delegatecall target
+      await indexer.waitUntil(
+        async () => {
+          const targets = await db.getDelegatecallTargets(dcWalletAddress);
+          return targets.find(
+            (t) => t.target_address.toLowerCase() === multiSendCallOnlyAddress.toLowerCase() && t.is_active
+          ) || null;
+        },
+        'Initial delegatecall target indexed',
+        e2eConfig.txConfirmationTimeout
+      );
+
+      await db.verifyDelegatecallTarget(dcWalletAddress, multiSendCallOnlyAddress, true);
+      console.log('  ✓ Initial delegatecall target indexed from wallet creation');
+
+      // Verify the module was also enabled during initialize()
+      await db.verifyModuleEnabled(dcWalletAddress, moduleAddress);
+      console.log('  ✓ Initial module enabled from wallet creation');
     });
 
-    it('should index DelegatecallDisabledChanged when toggled to false', async () => {
-      const data = walletIface.encodeFunctionData('setDelegatecallDisabled', [false]);
-      await executeSelfCall(wallet, walletAddress, data, [owner1, owner2, owner3], THRESHOLD);
+    it('should index DelegatecallTargetAdded when target added via self-call', async () => {
+      if (!dcWallet || !dcWalletAddress) {
+        console.log('  ⏭️ Skipping — depends on previous test');
+        return;
+      }
+
+      // Use guardian1.address as an arbitrary new target address
+      const newTarget = guardian1.address;
+
+      const data = walletIface.encodeFunctionData('addDelegatecallTarget', [newTarget]);
+      await executeSelfCall(dcWallet, dcWalletAddress, data, [owner1, owner2, owner3], THRESHOLD);
 
       await indexer.waitUntil(
         async () => {
-          const w = await db.getWallet(walletAddress);
-          return w?.delegatecall_disabled === false ? w : null;
+          const targets = await db.getDelegatecallTargets(dcWalletAddress);
+          return targets.find(
+            (t) => t.target_address.toLowerCase() === newTarget.toLowerCase() && t.is_active
+          ) || null;
         },
-        'delegatecall_disabled toggled to false',
+        'DelegatecallTargetAdded indexed',
         e2eConfig.txConfirmationTimeout
       );
-      await db.verifyDelegatecallDisabled(walletAddress, false);
-      console.log('  ✓ DelegatecallDisabledChanged indexed (set to false)');
+
+      await db.verifyDelegatecallTarget(dcWalletAddress, newTarget, true);
+      console.log('  ✓ DelegatecallTargetAdded indexed');
     });
 
-    it('should index DelegatecallDisabledChanged when toggled back to true', async () => {
-      const data = walletIface.encodeFunctionData('setDelegatecallDisabled', [true]);
-      await executeSelfCall(wallet, walletAddress, data, [owner1, owner2, owner3], THRESHOLD);
+    it('should index DelegatecallTargetRemoved when target removed via self-call', async () => {
+      if (!dcWallet || !dcWalletAddress) {
+        console.log('  ⏭️ Skipping — depends on previous test');
+        return;
+      }
+
+      // Remove the target added in the previous test
+      const targetToRemove = guardian1.address;
+
+      const data = walletIface.encodeFunctionData('removeDelegatecallTarget', [targetToRemove]);
+      await executeSelfCall(dcWallet, dcWalletAddress, data, [owner1, owner2, owner3], THRESHOLD);
 
       await indexer.waitUntil(
         async () => {
-          const w = await db.getWallet(walletAddress);
-          return w?.delegatecall_disabled === true ? w : null;
+          const targets = await db.getDelegatecallTargets(dcWalletAddress);
+          const target = targets.find(
+            (t) => t.target_address.toLowerCase() === targetToRemove.toLowerCase()
+          );
+          return target && !target.is_active ? target : null;
         },
-        'delegatecall_disabled toggled back to true',
+        'DelegatecallTargetRemoved indexed',
         e2eConfig.txConfirmationTimeout
       );
-      await db.verifyDelegatecallDisabled(walletAddress, true);
-      console.log('  ✓ DelegatecallDisabledChanged indexed (reset to true)');
+
+      await db.verifyDelegatecallTarget(dcWalletAddress, targetToRemove, false);
+      console.log('  ✓ DelegatecallTargetRemoved indexed');
     });
   });
 

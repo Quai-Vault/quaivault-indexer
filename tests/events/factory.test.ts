@@ -7,7 +7,6 @@ vi.mock('../../src/services/supabase.js', () => ({
     upsertWallet: vi.fn().mockResolvedValue(undefined),
     addOwnersBatch: vi.fn().mockResolvedValue(undefined),
     updateWalletDelay: vi.fn().mockResolvedValue(undefined),
-    updateWalletDelegatecallDisabled: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -49,10 +48,9 @@ describe('factory event handlers', () => {
 
   describe('handleWalletCreated', () => {
     it('calls upsertWallet and addOwnersBatch with correct args', async () => {
-      // minExecutionDelay() returns 0, delegatecallDisabled() returns true (1)
+      // minExecutionDelay() returns 0
       vi.mocked(quai.callContract)
-        .mockResolvedValueOnce('0x0000000000000000000000000000000000000000000000000000000000000000')
-        .mockResolvedValueOnce('0x0000000000000000000000000000000000000000000000000000000000000001');
+        .mockResolvedValueOnce('0x0000000000000000000000000000000000000000000000000000000000000000');
 
       const event = makeEvent({
         args: {
@@ -71,7 +69,6 @@ describe('factory event handlers', () => {
         createdAtBlock: 100,
         createdAtTx: '0xtx123',
         minExecutionDelay: 0,
-        delegatecallDisabled: true,
       });
 
       expect(supabase.addOwnersBatch).toHaveBeenCalledWith([
@@ -120,8 +117,7 @@ describe('factory event handlers', () => {
       vi.mocked(quai.callContract)
         .mockResolvedValueOnce(ownersData)       // getOwners()
         .mockResolvedValueOnce(thresholdData)     // threshold()
-        .mockResolvedValueOnce('0x0000000000000000000000000000000000000000000000000000000000000000')  // minExecutionDelay()
-        .mockResolvedValueOnce('0x0000000000000000000000000000000000000000000000000000000000000001'); // delegatecallDisabled()
+        .mockResolvedValueOnce('0x0000000000000000000000000000000000000000000000000000000000000000');  // minExecutionDelay()
 
       const event = makeEvent({
         name: 'WalletRegistered',
@@ -140,7 +136,6 @@ describe('factory event handlers', () => {
         createdAtBlock: 100,
         createdAtTx: '0xtx123',
         minExecutionDelay: 0,
-        delegatecallDisabled: true,
       });
 
       expect(supabase.addOwnersBatch).toHaveBeenCalledWith(
