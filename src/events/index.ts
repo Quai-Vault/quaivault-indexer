@@ -28,7 +28,8 @@ import {
   handleTransactionFailed,
   handleTransactionExpired,
   handleMinExecutionDelayChanged,
-  handleDelegatecallDisabledChanged,
+  handleDelegatecallTargetAdded,
+  handleDelegatecallTargetRemoved,
 } from './vault-core.js';
 import {
   handleRecoverySetup,
@@ -107,8 +108,11 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
       case 'MinExecutionDelayChanged':
         await handleMinExecutionDelayChanged(event);
         break;
-      case 'DelegatecallDisabledChanged':
-        await handleDelegatecallDisabledChanged(event);
+      case 'DelegatecallTargetAdded':
+        await handleDelegatecallTargetAdded(event);
+        break;
+      case 'DelegatecallTargetRemoved':
+        await handleDelegatecallTargetRemoved(event);
         break;
 
       // Message signing events (EIP-1271)

@@ -30,7 +30,6 @@ export interface Wallet {
   createdAtBlock: number;
   createdAtTx: string;
   minExecutionDelay?: number;
-  delegatecallDisabled?: boolean;
 }
 
 export interface WalletOwner {
@@ -115,6 +114,16 @@ export interface WalletModule {
   enabledAtTx: string;
   disabledAtBlock?: number;
   disabledAtTx?: string;
+  isActive: boolean;
+}
+
+export interface WalletDelegatecallTarget {
+  walletAddress: string;
+  targetAddress: string;
+  addedAtBlock: number;
+  addedAtTx: string;
+  removedAtBlock?: number;
+  removedAtTx?: string;
   isActive: boolean;
 }
 

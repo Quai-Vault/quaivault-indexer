@@ -359,21 +359,38 @@ export async function handleMinExecutionDelayChanged(event: DecodedEvent): Promi
   );
 }
 
-export async function handleDelegatecallDisabledChanged(event: DecodedEvent): Promise<void> {
-  const { disabled } = validateEventArgs<{
-    disabled: boolean;
-  }>(event.args, ['disabled'], 'DelegatecallDisabledChanged');
+export async function handleDelegatecallTargetAdded(event: DecodedEvent): Promise<void> {
+  const { target } = validateEventArgs<{
+    target: string;
+  }>(event.args, ['target'], 'DelegatecallTargetAdded');
 
-  if (typeof disabled !== 'boolean') {
-    logger.error({ wallet: event.address, disabled, type: typeof disabled },
-      'DelegatecallDisabledChanged: disabled is not a boolean');
-    return;
-  }
-
-  await supabase.updateWalletDelegatecallDisabled(event.address, disabled);
+  await supabase.addDelegatecallTarget(
+    event.address,
+    target,
+    event.blockNumber,
+    event.transactionHash
+  );
 
   logger.info(
-    { wallet: event.address, disabled },
-    'DelegateCall disabled flag changed'
+    { wallet: event.address, target },
+    'DelegateCall target added'
+  );
+}
+
+export async function handleDelegatecallTargetRemoved(event: DecodedEvent): Promise<void> {
+  const { target } = validateEventArgs<{
+    target: string;
+  }>(event.args, ['target'], 'DelegatecallTargetRemoved');
+
+  await supabase.removeDelegatecallTarget(
+    event.address,
+    target,
+    event.blockNumber,
+    event.transactionHash
+  );
+
+  logger.info(
+    { wallet: event.address, target },
+    'DelegateCall target removed'
   );
 }

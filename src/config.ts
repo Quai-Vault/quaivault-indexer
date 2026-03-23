@@ -42,7 +42,7 @@ export const config = {
     quaiVaultFactory: process.env.QUAIVAULT_FACTORY_ADDRESS!,
     quaiVaultImplementation: process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS!,
     socialRecoveryModule: process.env.SOCIAL_RECOVERY_MODULE_ADDRESS,
-    multiSend: process.env.MULTISEND_ADDRESS,
+    multiSendCallOnly: process.env.MULTISEND_CALL_ONLY_ADDRESS,
   },
 
   // Indexer settings
@@ -165,7 +165,7 @@ function validateConfig(): void {
   // Validate optional contract addresses if provided
   const optionalContracts: Array<[string, string | undefined]> = [
     ['SOCIAL_RECOVERY_MODULE_ADDRESS', process.env.SOCIAL_RECOVERY_MODULE_ADDRESS],
-    ['MULTISEND_ADDRESS', process.env.MULTISEND_ADDRESS],
+    ['MULTISEND_CALL_ONLY_ADDRESS', process.env.MULTISEND_CALL_ONLY_ADDRESS],
   ];
   for (const [name, address] of optionalContracts) {
     if (address && !isQuaiAddress(address)) {

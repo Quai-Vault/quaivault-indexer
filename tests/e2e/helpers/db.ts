@@ -10,7 +10,6 @@ export interface WalletRecord {
   threshold: number;
   owner_count: number;
   min_execution_delay?: number;
-  delegatecall_disabled: boolean;
   created_at_block: number;
   created_at_tx: string;
   created_at: string;
@@ -180,6 +179,19 @@ export interface TokenTransferRecord {
   transaction_hash: string;
   log_index: number;
   created_at: string;
+}
+
+export interface DelegatecallTargetRecord {
+  id: string;
+  wallet_address: string;
+  target_address: string;
+  added_at_block: number;
+  added_at_tx: string;
+  removed_at_block: number | null;
+  removed_at_tx: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SignedMessageRecord {
@@ -608,10 +620,32 @@ export class DatabaseVerifier {
     expect(wallet!.min_execution_delay).toBe(expectedDelay);
   }
 
-  async verifyDelegatecallDisabled(walletAddress: string, expected: boolean): Promise<void> {
-    const wallet = await this.getWallet(walletAddress);
-    expect(wallet).not.toBeNull();
-    expect(wallet!.delegatecall_disabled).toBe(expected);
+  // ============================================
+  // DELEGATECALL TARGET VERIFICATION
+  // ============================================
+
+  async getDelegatecallTargets(walletAddress: string): Promise<DelegatecallTargetRecord[]> {
+    const { data, error } = await this.supabase
+      .from('wallet_delegatecall_targets')
+      .select('*')
+      .eq('wallet_address', walletAddress.toLowerCase())
+      .order('added_at_block', { ascending: true });
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  async verifyDelegatecallTarget(
+    walletAddress: string,
+    targetAddress: string,
+    isActive: boolean
+  ): Promise<void> {
+    const targets = await this.getDelegatecallTargets(walletAddress);
+    const target = targets.find(
+      (t) => t.target_address.toLowerCase() === targetAddress.toLowerCase()
+    );
+    expect(target).not.toBeUndefined();
+    expect(target!.is_active).toBe(isActive);
   }
 
   async verifyRecoveryConfigDeactivated(walletAddress: string): Promise<void> {

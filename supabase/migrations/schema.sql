@@ -238,6 +238,7 @@ BEGIN
     EXECUTE format('DROP TABLE IF EXISTS %I.signed_messages CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.module_executions CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.deposits CASCADE', schema_name);
+    EXECUTE format('DROP TABLE IF EXISTS %I.wallet_delegatecall_targets CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.wallet_modules CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.confirmations CASCADE', schema_name);
     EXECUTE format('DROP TABLE IF EXISTS %I.transactions CASCADE', schema_name);
@@ -276,7 +277,6 @@ BEGIN
             created_at_block BIGINT NOT NULL,
             created_at_tx TEXT NOT NULL,
             min_execution_delay INTEGER DEFAULT 0,
-            delegatecall_disabled BOOLEAN NOT NULL DEFAULT true,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )', schema_name);
@@ -360,6 +360,22 @@ BEGIN
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(wallet_address, module_address)
+        )', schema_name, schema_name);
+
+    -- Wallet delegatecall targets (whitelist)
+    EXECUTE format('
+        CREATE TABLE IF NOT EXISTS %I.wallet_delegatecall_targets (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            wallet_address TEXT NOT NULL REFERENCES %I.wallets(address) ON DELETE CASCADE,
+            target_address TEXT NOT NULL,
+            added_at_block BIGINT NOT NULL,
+            added_at_tx TEXT NOT NULL,
+            removed_at_block BIGINT,
+            removed_at_tx TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(wallet_address, target_address)
         )', schema_name, schema_name);
 
     -- Deposits
@@ -566,6 +582,7 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_confirmations_wallet_txhash ON %I.confirmations(wallet_address, tx_hash)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_confirmations_active ON %I.confirmations(wallet_address, tx_hash) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_wallet_modules_active ON %I.wallet_modules(wallet_address) WHERE is_active = TRUE', schema_name);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_wallet_delegatecall_targets_active ON %I.wallet_delegatecall_targets(wallet_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_deposits_wallet ON %I.deposits(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_configs_wallet ON %I.social_recovery_configs(wallet_address)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_social_recovery_configs_active ON %I.social_recovery_configs(wallet_address) WHERE is_active = TRUE', schema_name);
@@ -756,6 +773,9 @@ BEGIN
     EXECUTE format('DROP TRIGGER IF EXISTS trigger_signed_messages_updated_at ON %I.signed_messages', schema_name);
     EXECUTE format('CREATE TRIGGER trigger_signed_messages_updated_at BEFORE UPDATE ON %I.signed_messages FOR EACH ROW EXECUTE FUNCTION public.update_updated_at()', schema_name);
 
+    EXECUTE format('DROP TRIGGER IF EXISTS trigger_delegatecall_targets_updated_at ON %I.wallet_delegatecall_targets', schema_name);
+    EXECUTE format('CREATE TRIGGER trigger_delegatecall_targets_updated_at BEFORE UPDATE ON %I.wallet_delegatecall_targets FOR EACH ROW EXECUTE FUNCTION public.update_updated_at()', schema_name);
+
     -- ============================================
     -- ROW LEVEL SECURITY
     -- ============================================
@@ -766,6 +786,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %I.transactions ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.confirmations ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.wallet_modules ENABLE ROW LEVEL SECURITY', schema_name);
+    EXECUTE format('ALTER TABLE %I.wallet_delegatecall_targets ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.deposits ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.module_executions ENABLE ROW LEVEL SECURITY', schema_name);
     EXECUTE format('ALTER TABLE %I.social_recovery_configs ENABLE ROW LEVEL SECURITY', schema_name);
@@ -788,6 +809,8 @@ BEGIN
     EXECUTE format('CREATE POLICY "Public read access" ON %I.confirmations FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.wallet_modules', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.wallet_modules FOR SELECT USING (true)', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.wallet_delegatecall_targets', schema_name);
+    EXECUTE format('CREATE POLICY "Public read access" ON %I.wallet_delegatecall_targets FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.deposits', schema_name);
     EXECUTE format('CREATE POLICY "Public read access" ON %I.deposits FOR SELECT USING (true)', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Public read access" ON %I.module_executions', schema_name);
@@ -820,6 +843,8 @@ BEGIN
     EXECUTE format('CREATE POLICY "Service write access" ON %I.confirmations FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.wallet_modules', schema_name);
     EXECUTE format('CREATE POLICY "Service write access" ON %I.wallet_modules FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
+    EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.wallet_delegatecall_targets', schema_name);
+    EXECUTE format('CREATE POLICY "Service write access" ON %I.wallet_delegatecall_targets FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.deposits', schema_name);
     EXECUTE format('CREATE POLICY "Service write access" ON %I.deposits FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.module_executions', schema_name);
@@ -889,6 +914,11 @@ BEGIN
 
     BEGIN
         EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.wallet_modules', schema_name);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+
+    BEGIN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE %I.wallet_delegatecall_targets', schema_name);
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
 

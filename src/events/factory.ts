@@ -31,17 +31,6 @@ async function queryDelay(wallet: string): Promise<number> {
   }
 }
 
-/** Query delegatecallDisabled from a wallet contract, defaulting to true. */
-async function queryDelegatecallDisabled(wallet: string): Promise<boolean> {
-  try {
-    const resultHex = await quai.callContract(wallet, 'delegatecallDisabled()');
-    return safeParseHex(resultHex, 'delegatecallDisabled') !== 0;
-  } catch (err) {
-    logger.debug({ err, wallet }, 'Could not query delegatecallDisabled, defaulting to true');
-    return true;
-  }
-}
-
 // AUDIT: Wallet addresses from WalletCreated/WalletRegistered events are validated
 // via validateEventArgs → validateAddress() before any DB writes. The indexer trusts
 // on-chain events emitted by the verified factory contract; CREATE2 address derivation
@@ -53,10 +42,7 @@ export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
     threshold: string;
   }>(event.args, ['wallet', 'owners', 'threshold'], 'WalletCreated');
 
-  const [minDelay, delegatecallDisabled] = await Promise.all([
-    queryDelay(wallet),
-    queryDelegatecallDisabled(wallet),
-  ]);
+  const minDelay = await queryDelay(wallet);
 
   await supabase.upsertWallet({
     address: wallet,
@@ -65,7 +51,6 @@ export async function handleWalletCreated(event: DecodedEvent): Promise<void> {
     createdAtBlock: event.blockNumber,
     createdAtTx: event.transactionHash,
     minExecutionDelay: minDelay,
-    delegatecallDisabled,
   });
 
   await supabase.addOwnersBatch(
@@ -88,11 +73,10 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
   }>(event.args, ['wallet'], 'WalletRegistered');
 
   try {
-    const [owners, threshold, minDelay, delegatecallDisabled] = await Promise.all([
+    const [owners, threshold, minDelay] = await Promise.all([
       quai.callContract(wallet, 'getOwners()'),
       quai.callContract(wallet, 'threshold()'),
       queryDelay(wallet),
-      queryDelegatecallDisabled(wallet),
     ]);
 
     const ownerAddresses = decodeAddressArray(owners);
@@ -105,7 +89,6 @@ export async function handleWalletRegistered(event: DecodedEvent): Promise<void>
       createdAtBlock: event.blockNumber,
       createdAtTx: event.transactionHash,
       minExecutionDelay: minDelay,
-      delegatecallDisabled,
     });
 
     await supabase.addOwnersBatch(

@@ -223,13 +223,14 @@ export class ContractHelper {
     owners: string[],
     threshold: number,
     minExecutionDelay: number = 0,
-    delegatecallDisabled: boolean = true
+    initialModules: string[] = [],
+    initialDelegatecallTargets: string[] = []
   ): Promise<{ salt: string; expectedAddress: string }> {
     const senderAddress = this.ownerWallets[0].address;
 
-    // Encode the initialization data for QuaiVault.initialize(owners, threshold, minExecutionDelay, delegatecallDisabled)
+    // Encode the initialization data for QuaiVault.initialize(owners, threshold, minExecutionDelay, initialModules, initialDelegatecallTargets)
     const vaultIface = new quais.Interface(QuaiVaultABI);
-    const initData = vaultIface.encodeFunctionData('initialize', [owners, threshold, minExecutionDelay, delegatecallDisabled]);
+    const initData = vaultIface.encodeFunctionData('initialize', [owners, threshold, minExecutionDelay, initialModules, initialDelegatecallTargets]);
 
     // Encode constructor arguments for QuaiVaultProxy(implementation, initData)
     const encodedArgs = quais.AbiCoder.defaultAbiCoder().encode(
@@ -286,9 +287,14 @@ export class ContractHelper {
    * Includes retry logic for intermittent "Access list creation failed" errors
    * @returns The deployed wallet address
    */
-  async deployWallet(owners: string[], threshold: number, delegatecallDisabled: boolean = true): Promise<string> {
+  async deployWallet(
+    owners: string[],
+    threshold: number,
+    initialModules: string[] = [],
+    initialDelegatecallTargets: string[] = []
+  ): Promise<string> {
     // Mine a salt that produces a valid address for cyprus1 shard (0x00 prefix)
-    const { salt, expectedAddress } = await this.mineSalt(owners, threshold, 0, delegatecallDisabled);
+    const { salt, expectedAddress } = await this.mineSalt(owners, threshold, 0, initialModules, initialDelegatecallTargets);
 
     console.log(`    Calling createWallet with ${owners.length} owners, threshold ${threshold}`);
     console.log(`    Mined salt: ${salt}`);
@@ -310,14 +316,15 @@ export class ContractHelper {
 
         // Use explicit method signature for CREATE2 deployment
         console.log(`    Sending transaction... (attempt ${attempt}/${MAX_RETRIES})`);
-        if (!delegatecallDisabled) {
-          // Use 5-param overload for non-default delegatecallDisabled value
-          tx = await this.quaiVaultFactory['createWallet(address[],uint256,bytes32,uint32,bool)'](
+        if (initialModules.length > 0 || initialDelegatecallTargets.length > 0) {
+          // Use 6-param overload when modules or delegatecall targets are provided
+          tx = await this.quaiVaultFactory['createWallet(address[],uint256,bytes32,uint32,address[],address[])'](
             owners,
             threshold,
             salt,
             0,
-            delegatecallDisabled
+            initialModules,
+            initialDelegatecallTargets
           );
         } else {
           tx = await this.quaiVaultFactory.createWallet(

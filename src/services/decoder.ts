@@ -27,7 +27,8 @@ export const EVENT_SIGNATURES = {
   DisabledModule: quais.id('DisabledModule(address)'),
   Received: quais.id('Received(address,uint256)'),
   MinExecutionDelayChanged: quais.id('MinExecutionDelayChanged(uint32,uint32)'),
-  DelegatecallDisabledChanged: quais.id('DelegatecallDisabledChanged(bool)'),
+  DelegatecallTargetAdded: quais.id('DelegatecallTargetAdded(address)'),
+  DelegatecallTargetRemoved: quais.id('DelegatecallTargetRemoved(address)'),
   MessageSigned: quais.id('MessageSigned(bytes32,bytes)'),
   MessageUnsigned: quais.id('MessageUnsigned(bytes32,bytes)'),
 
@@ -102,7 +103,8 @@ const EVENT_ABIS: Record<string, string[]> = {
   DisabledModule: ['address indexed module'],
   Received: ['address indexed sender', 'uint256 amount'],
   MinExecutionDelayChanged: ['uint32 oldDelay', 'uint32 newDelay'],
-  DelegatecallDisabledChanged: ['bool disabled'],
+  DelegatecallTargetAdded: ['address indexed target'],
+  DelegatecallTargetRemoved: ['address indexed target'],
   MessageSigned: ['bytes32 indexed msgHash', 'bytes data'],
   MessageUnsigned: ['bytes32 indexed msgHash', 'bytes data'],
 
@@ -338,9 +340,14 @@ const FUNCTION_SELECTORS: Record<string, { name: string; abi: string; type: Tran
     abi: 'function setMinExecutionDelay(uint32 delay)',
     type: 'wallet_admin',
   },
-  [quais.id('setDelegatecallDisabled(bool)').slice(0, 10)]: {
-    name: 'setDelegatecallDisabled',
-    abi: 'function setDelegatecallDisabled(bool disabled)',
+  [quais.id('addDelegatecallTarget(address)').slice(0, 10)]: {
+    name: 'addDelegatecallTarget',
+    abi: 'function addDelegatecallTarget(address target)',
+    type: 'wallet_admin',
+  },
+  [quais.id('removeDelegatecallTarget(address)').slice(0, 10)]: {
+    name: 'removeDelegatecallTarget',
+    abi: 'function removeDelegatecallTarget(address target)',
     type: 'wallet_admin',
   },
 
@@ -592,8 +599,10 @@ export function getTransactionDescription(decoded: DecodedCalldata): string {
       return `Cancel transaction by consensus: ${args.txHash}`;
     case 'setMinExecutionDelay':
       return `Set minimum execution delay to ${args.delay}`;
-    case 'setDelegatecallDisabled':
-      return `${args.disabled === 'true' ? 'Disable' : 'Enable'} module DelegateCall operations`;
+    case 'addDelegatecallTarget':
+      return `Add delegatecall target: ${args.target}`;
+    case 'removeDelegatecallTarget':
+      return `Remove delegatecall target: ${args.target}`;
     case 'setupRecovery':
       return `Setup recovery with ${(args.guardians as string[]).length} guardians`;
     // Zodiac module execution functions

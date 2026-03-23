@@ -20,7 +20,7 @@ export interface E2EConfig {
   quaiVaultFactoryAddress: string;
   quaiVaultImplementation: string;
   socialRecoveryModuleAddress?: string;
-  multiSendAddress?: string;
+  multiSendCallOnlyAddress?: string;
   mockModuleAddress?: string;
   mockErc721Address?: string;
   mockErc1155Address?: string;
@@ -66,7 +66,7 @@ export function loadE2EConfig(): E2EConfig {
     quaiVaultFactoryAddress: process.env.QUAIVAULT_FACTORY || '',
     quaiVaultImplementation: process.env.QUAIVAULT_IMPLEMENTATION || '',
     socialRecoveryModuleAddress: process.env.SOCIAL_RECOVERY_MODULE,
-    multiSendAddress: process.env.MULTISEND,
+    multiSendCallOnlyAddress: process.env.MULTISEND_CALL_ONLY,
     mockModuleAddress: process.env.MOCK_MODULE,
     mockErc721Address: process.env.MOCK_ERC721,
     mockErc1155Address: process.env.MOCK_ERC1155,
@@ -151,7 +151,7 @@ export function getAvailableModuleTests(config: E2EConfig): {
 } {
   return {
     socialRecovery: !!config.socialRecoveryModuleAddress,
-    multiSend: !!config.multiSendAddress,
+    multiSend: !!config.multiSendCallOnlyAddress,
     mockModule: !!config.mockModuleAddress,
     mockErc721: !!config.mockErc721Address,
     mockErc1155: !!config.mockErc1155Address,

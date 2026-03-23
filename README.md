@@ -4,7 +4,7 @@ A blockchain indexing service for QuaiVault multisig wallets on Quai Network. In
 
 ## Features
 
-- Indexes 30 event types from QuaiVault, Factory, and module contracts (plus ERC20/ERC721/ERC1155 Transfer wildcards)
+- Indexes 31 event types from QuaiVault, Factory, and module contracts (plus ERC20/ERC721/ERC1155 Transfer wildcards)
 - Real-time updates via Supabase Realtime subscriptions
 - Historical backfill with resume capability
 - Transaction type decoding (transfer, wallet_admin, module_config, etc.)
@@ -57,7 +57,7 @@ QUAIVAULT_IMPLEMENTATION_ADDRESS=0x...
 
 # Optional - Module and utility contracts (if deployed)
 SOCIAL_RECOVERY_MODULE_ADDRESS=0x...
-MULTISEND_ADDRESS=0x...
+MULTISEND_CALL_ONLY_ADDRESS=0x...
 
 # Optional - Indexer settings (use base URL without shard path)
 QUAI_RPC_URL=https://rpc.orchard.quai.network
@@ -149,6 +149,7 @@ src/
 |-------|-------------|
 | `wallets` | Deployed multisig wallet instances |
 | `wallet_owners` | Wallet owner addresses with active status |
+| `wallet_delegatecall_targets` | Per-wallet DelegateCall target whitelist |
 | `transactions` | Proposed multisig transactions (with timelock/expiration) |
 | `confirmations` | Owner approvals for transactions |
 | `wallet_modules` | Enabled modules per wallet |
@@ -168,12 +169,12 @@ src/
 | `social_recoveries` | Recovery requests |
 | `social_recovery_approvals` | Guardian approvals |
 
-## Indexed Events (30 + Token Transfer wildcards)
+## Indexed Events (31 + Token Transfer wildcards)
 
 | Contract | Events |
 |----------|--------|
 | QuaiVaultFactory | `WalletCreated`, `WalletRegistered` |
-| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `DelegatecallDisabledChanged`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
+| QuaiVault | `TransactionProposed`, `TransactionApproved`, `ApprovalRevoked`, `TransactionExecuted`, `TransactionCancelled`, `ThresholdReached`, `TransactionFailed`, `TransactionExpired`, `OwnerAdded`, `OwnerRemoved`, `ThresholdChanged`, `MinExecutionDelayChanged`, `DelegatecallTargetAdded`, `DelegatecallTargetRemoved`, `EnabledModule`, `DisabledModule`, `Received`, `ExecutionFromModuleSuccess`, `ExecutionFromModuleFailure`, `MessageSigned`, `MessageUnsigned` |
 | SocialRecoveryModule | `RecoverySetup`, `RecoveryInitiated`, `RecoveryApproved`, `RecoveryApprovalRevoked`, `RecoveryExecuted`, `RecoveryCancelled`, `RecoveryInvalidated`, `RecoveryExpiredEvent`, `RecoveryConfigCleared` |
 | ERC20/ERC721 | `Transfer` (wildcard scan for auto-discovered tokens) |
 | ERC1155 | `TransferSingle`, `TransferBatch` (wildcard scan for auto-discovered tokens) |
@@ -185,7 +186,7 @@ The indexer decodes calldata for proposed transactions:
 | Type | Description |
 |------|-------------|
 | `transfer` | Native QUAI transfer (no data) |
-| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay, setDelegatecallDisabled |
+| `wallet_admin` | addOwner, removeOwner, changeThreshold, enableModule, disableModule, cancelByConsensus, setMinExecutionDelay, addDelegatecallTarget, removeDelegatecallTarget |
 | `module_config` | setupRecovery, etc. |
 | `recovery_setup` | Social recovery configuration |
 | `message_signing` | signMessage, unsignMessage (EIP-1271) |
@@ -214,7 +215,7 @@ The indexer decodes calldata for proposed transactions:
 | `QUAI_RPC_URL` | `https://rpc.quai.network` | Quai RPC endpoint (base URL, shard auto-appended) |
 | `SUPABASE_SCHEMA` | `public` | Database schema (`dev`, `testnet`, `mainnet`) |
 | `SOCIAL_RECOVERY_MODULE_ADDRESS` | - | SocialRecoveryModule contract address |
-| `MULTISEND_ADDRESS` | - | MultiSend utility contract address |
+| `MULTISEND_CALL_ONLY_ADDRESS` | - | MultiSendCallOnly contract address (rejects nested DelegateCall sub-transactions) |
 | `SEED_TOKEN_ADDRESSES` | - | Comma-separated ERC20/ERC721 addresses to track from startup |
 | `CORS_ALLOWED_ORIGINS` | - | Comma-separated allowed origins for health endpoint |
 | `HEALTH_CHECK_HOST` | `0.0.0.0` | Bind address for health server |
