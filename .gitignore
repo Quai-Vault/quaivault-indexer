@@ -6,6 +6,7 @@ dist/
 
 # Environment files with secrets (keep examples)
 .env
+.env.testnet.bak
 .env.e2e
 .env.local
 .env.*.local
