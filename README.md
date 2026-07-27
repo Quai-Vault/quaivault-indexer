@@ -60,7 +60,7 @@ SOCIAL_RECOVERY_MODULE_ADDRESS=0x...
 MULTISEND_CALL_ONLY_ADDRESS=0x...
 
 # Optional - Indexer settings (use base URL without shard path)
-QUAI_RPC_URL=https://rpc.orchard.quai.network
+QUAI_RPC_URL=https://orchard.rpc.quai.network
 BATCH_SIZE=1000
 POLL_INTERVAL=5000
 START_BLOCK=0
@@ -317,6 +317,7 @@ ORDER BY created_at DESC LIMIT 20;
 
 - [TESTING.md](TESTING.md) - Unit and E2E testing guide
 - [DEPLOYMENT.md](DEPLOYMENT.md) - VPS deployment (Docker / systemd)
+- [KNOWN_DATA_GAPS.md](KNOWN_DATA_GAPS.md) - Two cases where indexed state diverges from the chain, with proposed fixes. **Read this before consuming `confirmation_count` or `status` directly.**
 - [INDEXER_FRONTEND_INTEGRATION.md](INDEXER_FRONTEND_INTEGRATION.md) - Frontend integration guide
 
 ## License

@@ -97,7 +97,7 @@ Before running E2E tests, you need:
 
    ```bash
    # Quai Network (Orchard Testnet)
-   QUAI_RPC_URL=https://rpc.orchard.quai.network
+   QUAI_RPC_URL=https://orchard.rpc.quai.network
    QUAI_CHAIN_ID=9000
 
    # Test wallet private keys (NEVER use keys with real funds!)

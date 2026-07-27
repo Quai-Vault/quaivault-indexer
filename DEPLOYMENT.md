@@ -34,7 +34,7 @@ This guide covers deploying the QuaiVault Indexer on a VPS using either Docker o
 
 | Network | RPC URL |
 |---------|---------|
-| Orchard Testnet | `https://rpc.orchard.quai.network` |
+| Orchard Testnet | `https://orchard.rpc.quai.network` |
 | Mainnet | `https://rpc.quai.network` |
 
 ---
@@ -45,7 +45,7 @@ This guide covers deploying the QuaiVault Indexer on a VPS using either Docker o
 
 ```bash
 # Quai Network (use base URL - shard auto-appended)
-QUAI_RPC_URL=https://rpc.orchard.quai.network
+QUAI_RPC_URL=https://orchard.rpc.quai.network
 
 # Supabase
 SUPABASE_URL=https://your-project.supabase.co
@@ -442,7 +442,7 @@ Error: RPC error: fetch failed
 ```bash
 curl -X POST -H "Content-Type: application/json" \
   --data '{"jsonrpc":"2.0","method":"quai_blockNumber","params":[],"id":1}' \
-  https://rpc.orchard.quai.network/cyprus1
+  https://orchard.rpc.quai.network/cyprus1
 ```
 
 #### 2. Supabase Connection Errors

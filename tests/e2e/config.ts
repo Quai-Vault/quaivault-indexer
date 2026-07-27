@@ -55,7 +55,7 @@ export function loadE2EConfig(): E2EConfig {
 
   return {
     // Blockchain - base URL without shard path (usePathing: true handles routing)
-    rpcUrl: process.env.QUAI_RPC_URL || 'https://rpc.orchard.quai.network',
+    rpcUrl: process.env.QUAI_RPC_URL || 'https://orchard.rpc.quai.network',
     chainId: parseInt(process.env.QUAI_CHAIN_ID || '9000', 10),
 
     // Test wallets
