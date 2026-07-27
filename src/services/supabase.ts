@@ -298,6 +298,31 @@ class SupabaseService {
 
       if (error) this.fail('removeOwner', error);
     }, { maxAttempts: 3, delayMs: 1000, operation: 'removeOwner' });
+
+    // The vault invalidates every in-flight approval from this address by bumping
+    // ownerVersions (QuaiVault._removeOwner), so hasApproved() goes false for all of
+    // them at once. Mirror that here or confirmation_count over-reports for as long as
+    // those transactions stay open. The AFTER UPDATE trigger on confirmations recomputes
+    // the count for each affected transaction.
+    //
+    // Permanent by design: the epoch never rewinds, so re-adding this owner must NOT
+    // reactivate these rows. That is also why this cannot be a view joined against
+    // wallet_owners.is_active — a re-add would resurrect approvals the contract
+    // considers dead. See KNOWN_DATA_GAPS.md Gap 1.
+    await withRetry(async () => {
+      const { error } = await this.client
+        .from('confirmations')
+        .update({
+          is_active: false,
+          invalidated_at_block: removedAtBlock,
+          invalidated_reason: 'owner_removed',
+        })
+        .eq('wallet_address', normalizedWallet)
+        .eq('owner_address', normalizedOwner)
+        .eq('is_active', true);
+
+      if (error) this.fail('removeOwner.invalidateConfirmations', error);
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'removeOwner.invalidateConfirmations' });
   }
 
   // ============================================

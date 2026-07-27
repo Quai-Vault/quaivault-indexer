@@ -184,6 +184,41 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END
 $$;
 
+-- The CREATE TYPE above is guarded by IF NOT EXISTS, so a type created by an
+-- earlier schema version never picks up values added later. transaction_status and
+-- transaction_type have catch-up blocks; recovery_status was missing one, and every
+-- live schema was left without 'invalidated' or 'expired' — which silently broke
+-- the RecoveryExpiredEvent and recovery-invalidation handlers with a 22P02.
+-- See supabase/migrations/000_recovery_status_enum.sql.
+
+DO $$
+BEGIN
+    -- Add 'invalidated' to recovery_status enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'invalidated'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'recovery_status')
+    ) THEN
+        ALTER TYPE public.recovery_status ADD VALUE 'invalidated';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    -- Add 'expired' to recovery_status enum
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum
+        WHERE enumlabel = 'expired'
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'recovery_status')
+    ) THEN
+        ALTER TYPE public.recovery_status ADD VALUE 'expired';
+    END IF;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$$;
+
 DO $$
 BEGIN
     -- Token standard enum (ERC20, ERC721, ERC1155)
@@ -339,6 +374,11 @@ BEGIN
             confirmed_at_tx TEXT NOT NULL,
             revoked_at_block BIGINT,
             revoked_at_tx TEXT,
+            -- Set when the owner was removed and the vault bumped ownerVersions,
+            -- invalidating this approval. Distinct from revoked_at_block, which is
+            -- reserved for a genuine ApprovalRevoked event. See KNOWN_DATA_GAPS.md Gap 1.
+            invalidated_at_block BIGINT,
+            invalidated_reason TEXT,
             is_active BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             FOREIGN KEY (wallet_address, tx_hash)
@@ -581,6 +621,8 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_transactions_pending ON %I.transactions(wallet_address) WHERE status = ''pending''', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_confirmations_wallet_txhash ON %I.confirmations(wallet_address, tx_hash)', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_confirmations_active ON %I.confirmations(wallet_address, tx_hash) WHERE is_active = TRUE', schema_name);
+    -- Serves the owner-removal invalidation UPDATE, which filters by owner rather than tx.
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_confirmations_wallet_owner_active ON %I.confirmations(wallet_address, owner_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_wallet_modules_active ON %I.wallet_modules(wallet_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_wallet_delegatecall_targets_active ON %I.wallet_delegatecall_targets(wallet_address) WHERE is_active = TRUE', schema_name);
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_deposits_wallet ON %I.deposits(wallet_address)', schema_name);
@@ -865,6 +907,68 @@ BEGIN
     EXECUTE format('CREATE POLICY "Service write access" ON %I.token_transfers FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
     EXECUTE format('DROP POLICY IF EXISTS "Service write access" ON %I.signed_messages', schema_name);
     EXECUTE format('CREATE POLICY "Service write access" ON %I.signed_messages FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')', schema_name);
+
+    -- ============================================
+    -- EFFECTIVE-STATUS VIEWS
+    -- ============================================
+    -- Expiry on chain is a timestamp comparison, not a state transition. expireTransaction /
+    -- expireRecovery are permissionless cleanup calls that often nobody makes, so no event
+    -- fires and the stored status stays 'pending' indefinitely past the deadline. These views
+    -- derive the status the chain would report. Keep reading the stored `status` for states
+    -- only the indexer knows (notably 'cancelled' recoveries, whose on-chain struct is deleted).
+    --
+    -- NOTE: created BEFORE the GRANT block below on purpose — "GRANT SELECT ON ALL TABLES"
+    -- covers views, but only ones that exist when it runs.
+
+    -- The views cast to the status enums, so the labels must already exist AND have been
+    -- committed by an earlier transaction (a new enum value cannot be used in the
+    -- transaction that adds it). The ALTER TYPE blocks at the top of this file handle that
+    -- — provided create_quaivault_schema() is CALLED separately, after those have committed,
+    -- which is how DEPLOYMENT.md describes it. Fail with something actionable if not.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+        WHERE t.typname = 'recovery_status' AND e.enumlabel = 'expired'
+    ) THEN
+        RAISE EXCEPTION
+            'public.recovery_status is missing the ''expired'' label. Run the ALTER TYPE blocks at the top of schema.sql (or supabase/migrations/000_recovery_status_enum.sql), let them COMMIT, then call create_quaivault_schema() again.';
+    END IF;
+
+    EXECUTE format('DROP VIEW IF EXISTS %I.transactions_effective', schema_name);
+    EXECUTE format('
+        CREATE VIEW %I.transactions_effective AS
+        SELECT t.*,
+               CASE
+                 WHEN t.status = ''pending''
+                  AND COALESCE(t.expiration, 0) > 0
+                  AND t.expiration < extract(epoch from now())
+                 THEN ''expired''::public.transaction_status
+                 ELSE t.status
+               END AS effective_status
+        FROM %I.transactions t
+    ', schema_name, schema_name);
+
+    EXECUTE format('DROP VIEW IF EXISTS %I.social_recoveries_effective', schema_name);
+    EXECUTE format('
+        CREATE VIEW %I.social_recoveries_effective AS
+        SELECT r.*,
+               CASE
+                 WHEN r.status = ''pending''
+                  AND COALESCE(r.expiration, 0) > 0
+                  AND r.expiration < extract(epoch from now())
+                 THEN ''expired''::public.recovery_status
+                 ELSE r.status
+               END AS effective_status
+        FROM %I.social_recoveries r
+    ', schema_name, schema_name);
+
+    -- PG15+ only: make the views respect the querying role's RLS on the base tables instead
+    -- of running as the view owner. Without this Supabase's linter flags them as
+    -- SECURITY DEFINER views. Behaviour is unchanged either way here, since the base-table
+    -- read policy is USING (true).
+    IF current_setting('server_version_num')::int >= 150000 THEN
+        EXECUTE format('ALTER VIEW %I.transactions_effective SET (security_invoker = true)', schema_name);
+        EXECUTE format('ALTER VIEW %I.social_recoveries_effective SET (security_invoker = true)', schema_name);
+    END IF;
 
     -- ============================================
     -- GRANT PERMISSIONS
