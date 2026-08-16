@@ -4,7 +4,7 @@
 # Usage: ./scripts/health-check.sh [port]
 # Returns exit code 0 if healthy, 1 if unhealthy
 
-PORT="${1:-3000}"
+PORT="${1:-8080}"
 URL="http://localhost:$PORT/health"
 
 # Fetch health status

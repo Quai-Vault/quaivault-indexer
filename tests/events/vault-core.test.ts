@@ -10,8 +10,7 @@ vi.mock('../../src/services/supabase.js', () => ({
     addOwner: vi.fn().mockResolvedValue(undefined),
     removeOwner: vi.fn().mockResolvedValue(undefined),
     updateWalletThreshold: vi.fn().mockResolvedValue(undefined),
-    addModule: vi.fn().mockResolvedValue(undefined),
-    disableModule: vi.fn().mockResolvedValue(undefined),
+    applyModuleEvent: vi.fn().mockResolvedValue('applied'),
     addDeposit: vi.fn().mockResolvedValue(undefined),
     revokeConfirmation: vi.fn().mockResolvedValue(undefined),
     getTokenByAddress: vi.fn().mockResolvedValue(null),
@@ -44,6 +43,8 @@ import {
   handleTransactionExecuted,
   handleDelegatecallTargetAdded,
   handleDelegatecallTargetRemoved,
+  handleEnabledModule,
+  handleDisabledModule,
 } from '../../src/events/vault-core.js';
 import { supabase } from '../../src/services/supabase.js';
 
@@ -54,6 +55,7 @@ function makeEvent(overrides: Partial<DecodedEvent> = {}): DecodedEvent {
     blockNumber: 200,
     transactionHash: '0xtx456',
     logIndex: 0,
+    blockHash: '0xblock456',
     args: {},
     ...overrides,
   };
@@ -177,6 +179,58 @@ describe('vault-core event handlers', () => {
         200,
         '0xtx456'
       );
+    });
+  });
+
+  describe('module lifecycle handlers', () => {
+    it('applies an enabled event with full ordering provenance', async () => {
+      const event = makeEvent({
+        name: 'EnabledModule',
+        logIndex: 7,
+        args: { module: '0xModule' },
+      });
+
+      await handleEnabledModule(event);
+
+      expect(supabase.applyModuleEvent).toHaveBeenCalledWith({
+        walletAddress: '0xWallet',
+        moduleAddress: '0xModule',
+        eventType: 'enabled',
+        eventBlock: 200,
+        eventBlockHash: '0xblock456',
+        eventTx: '0xtx456',
+        logIndex: 7,
+      });
+    });
+
+    it('applies a disabled event with full ordering provenance', async () => {
+      const event = makeEvent({
+        name: 'DisabledModule',
+        logIndex: 8,
+        args: { module: '0xModule' },
+      });
+
+      await handleDisabledModule(event);
+
+      expect(supabase.applyModuleEvent).toHaveBeenCalledWith({
+        walletAddress: '0xWallet',
+        moduleAddress: '0xModule',
+        eventType: 'disabled',
+        eventBlock: 200,
+        eventBlockHash: '0xblock456',
+        eventTx: '0xtx456',
+        logIndex: 8,
+      });
+    });
+
+    it('propagates lifecycle write failures so the block cannot be checkpointed', async () => {
+      vi.mocked(supabase.applyModuleEvent).mockRejectedValueOnce(new Error('database unavailable'));
+      const event = makeEvent({
+        name: 'EnabledModule',
+        args: { module: '0xModule' },
+      });
+
+      await expect(handleEnabledModule(event)).rejects.toThrow('database unavailable');
     });
   });
 });

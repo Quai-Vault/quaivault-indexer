@@ -84,13 +84,29 @@ export interface WalletModuleRecord {
   id: string;
   wallet_address: string;
   module_address: string;
-  enabled_at_block: number;
-  enabled_at_tx: string;
+  enabled_at_block?: number;
+  enabled_at_tx?: string;
   disabled_at_block?: number;
   disabled_at_tx?: string;
   is_active: boolean;
+  last_event_block: number;
+  last_event_block_hash?: string;
+  last_event_tx: string;
+  last_event_log_index: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface WalletModuleEventRecord {
+  id: string;
+  wallet_address: string;
+  module_address: string;
+  event_type: 'enabled' | 'disabled';
+  event_block: number;
+  event_block_hash: string | null;
+  event_tx: string;
+  log_index: number;
+  created_at: string;
 }
 
 export interface ModuleExecutionRecord {
@@ -104,6 +120,7 @@ export interface ModuleExecutionRecord {
   data_hash?: string;
   executed_at_block: number;
   executed_at_tx: string;
+  log_index: number;
   created_at: string;
 }
 
@@ -406,6 +423,22 @@ export class DatabaseVerifier {
     );
     expect(module).not.toBeUndefined();
     expect(module!.is_active).toBe(false);
+  }
+
+  async getWalletModuleEvents(
+    walletAddress: string,
+    moduleAddress: string
+  ): Promise<WalletModuleEventRecord[]> {
+    const { data, error } = await this.supabase
+      .from('wallet_module_events')
+      .select('*')
+      .eq('wallet_address', walletAddress.toLowerCase())
+      .eq('module_address', moduleAddress.toLowerCase())
+      .order('event_block', { ascending: true })
+      .order('log_index', { ascending: true });
+
+    if (error) throw error;
+    return (data || []) as WalletModuleEventRecord[];
   }
 
   // ============================================

@@ -30,6 +30,10 @@ npm run test:watch
 npm run test:coverage
 ```
 
+CI enforces a 20% global floor for statements, branches, functions, and lines.
+This is a regression floor for the current mixed unit/E2E suite, not a claim
+that untested paths are low risk.
+
 **Test files** are located in `tests/` (unit) and `src/**/*.test.ts`:
 
 | File | Coverage |
@@ -45,6 +49,8 @@ npm run test:coverage
 | `tests/events/social-recovery.test.ts` | Social recovery event handlers |
 | `tests/events/message-signing.test.ts` | EIP-1271 message signing event handlers |
 | `tests/events/token-transfer.test.ts` | ERC20/ERC721/ERC1155 transfer handling |
+| `tests/services/module-lifecycle.test.ts` | Lifecycle RPC, inventory, filtering, and maintenance boundaries |
+| `tests/services/owner-removal-invalidation.test.ts` | Owner epoch invalidation regression coverage |
 
 ---
 
@@ -243,6 +249,13 @@ SELECT * FROM deposits WHERE wallet_address = 'your-address' ORDER BY created_at
 
 -- Check module executions (Zodiac)
 SELECT * FROM module_executions WHERE wallet_address = 'your-address' ORDER BY created_at DESC;
+
+-- Check immutable module lifecycle and current projection
+SELECT * FROM wallet_module_events WHERE wallet_address = 'your-address' ORDER BY event_block, log_index;
+SELECT * FROM wallet_modules WHERE wallet_address = 'your-address' ORDER BY module_address;
+
+-- Consumer inventory envelope with checkpoint freshness and execution counts
+SELECT get_wallet_module_inventory('your-address');
 
 -- Check token transfers
 SELECT * FROM token_transfers WHERE wallet_address = 'your-address' ORDER BY block_number DESC;

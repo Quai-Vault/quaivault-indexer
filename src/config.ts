@@ -22,6 +22,16 @@ function parseIntWithBounds(
   return parsed;
 }
 
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+  return value;
+}
+
+// Validate the environment before constructing the exported configuration so
+// every required value below has a concrete string type.
+validateConfig();
+
 export const config = {
   // Quai Network - base URL without shard path (usePathing: true handles routing)
   quai: {
@@ -31,16 +41,16 @@ export const config = {
 
   // Supabase
   supabase: {
-    url: process.env.SUPABASE_URL!,
-    serviceKey: process.env.SUPABASE_SERVICE_KEY!,
+    url: requiredEnv('SUPABASE_URL'),
+    serviceKey: requiredEnv('SUPABASE_SERVICE_KEY'),
     // Schema for multi-network support (testnet, mainnet, or public for legacy)
     schema: process.env.SUPABASE_SCHEMA || 'public',
   },
 
   // Contracts
   contracts: {
-    quaiVaultFactory: process.env.QUAIVAULT_FACTORY_ADDRESS!,
-    quaiVaultImplementation: process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS!,
+    quaiVaultFactory: requiredEnv('QUAIVAULT_FACTORY_ADDRESS'),
+    quaiVaultImplementation: requiredEnv('QUAIVAULT_IMPLEMENTATION_ADDRESS'),
     socialRecoveryModule: process.env.SOCIAL_RECOVERY_MODULE_ADDRESS,
     multiSendCallOnly: process.env.MULTISEND_CALL_ONLY_ADDRESS,
   },
@@ -53,7 +63,6 @@ export const config = {
     confirmations: parseIntWithBounds(process.env.CONFIRMATIONS, 2, 0, 100, 'CONFIRMATIONS'),
     getLogsChunkSize: parseIntWithBounds(process.env.GET_LOGS_CHUNK_SIZE, 100, 10, 1000, 'GET_LOGS_CHUNK_SIZE'),
     walletWarningThreshold: parseIntWithBounds(process.env.WALLET_WARNING_THRESHOLD, 500000, 1000, 10000000, 'WALLET_WARNING_THRESHOLD'),
-    reorgRollbackBlocks: parseIntWithBounds(process.env.REORG_ROLLBACK_BLOCKS, 10, 1, 1000, 'REORG_ROLLBACK_BLOCKS'),
   },
 
   // Health check settings
@@ -153,8 +162,8 @@ function validateConfig(): void {
 
   // Validate required contract addresses are valid Quai addresses
   const requiredContracts: Array<[string, string]> = [
-    ['QUAIVAULT_FACTORY_ADDRESS', process.env.QUAIVAULT_FACTORY_ADDRESS!],
-    ['QUAIVAULT_IMPLEMENTATION_ADDRESS', process.env.QUAIVAULT_IMPLEMENTATION_ADDRESS!],
+    ['QUAIVAULT_FACTORY_ADDRESS', requiredEnv('QUAIVAULT_FACTORY_ADDRESS')],
+    ['QUAIVAULT_IMPLEMENTATION_ADDRESS', requiredEnv('QUAIVAULT_IMPLEMENTATION_ADDRESS')],
   ];
   for (const [name, address] of requiredContracts) {
     if (!isQuaiAddress(address)) {
@@ -173,8 +182,6 @@ function validateConfig(): void {
     }
   }
 }
-
-validateConfig();
 
 // Deep freeze config to prevent accidental runtime mutations
 function deepFreeze<T extends object>(obj: T): T {

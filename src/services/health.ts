@@ -188,20 +188,21 @@ class HealthService {
     this.rateLimiter.clear();
 
     if (this.server) {
+      const server = this.server;
       return new Promise((resolve) => {
         const timeout = setTimeout(() => {
           logger.warn('Health check server close timeout, forcing shutdown');
           resolve();
         }, 5000);
 
-        this.server!.close(() => {
+        server.close(() => {
           clearTimeout(timeout);
           logger.info('Health check server stopped');
           resolve();
         });
 
-        if (typeof this.server!.closeAllConnections === 'function') {
-          this.server!.closeAllConnections();
+        if (typeof server.closeAllConnections === 'function') {
+          server.closeAllConnections();
         }
       });
     }
