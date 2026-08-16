@@ -401,8 +401,10 @@ BEGIN
                    OR lower(current_hash) IS DISTINCT FROM lower(p_expected_block_hash) THEN
                     RAISE EXCEPTION ''indexer checkpoint changed before reset'';
                 END IF;
-                DELETE FROM wallets;
-                DELETE FROM tokens;
+                -- Explicit predicates preserve full-reset semantics while remaining
+                -- compatible with Supabase's safe-update guard.
+                DELETE FROM wallets WHERE address IS NOT NULL;
+                DELETE FROM tokens WHERE address IS NOT NULL;
                 UPDATE indexer_state
                 SET last_indexed_block = p_last_indexed_block,
                     last_block_hash = NULL,

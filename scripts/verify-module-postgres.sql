@@ -16,6 +16,7 @@ END $$;
 SELECT drop_quaivault_schema('qv_module_ci');
 SELECT create_quaivault_schema('qv_module_ci');
 \ir ../supabase/migrations/004_wallet_module_lifecycle.sql
+\ir ../supabase/migrations/005_safe_rebuild_deletes.sql
 
 INSERT INTO qv_module_ci.wallets(
   address, threshold, owner_count, created_at_block, created_at_tx
@@ -88,4 +89,3 @@ END $$;
 
 SELECT qv_module_ci.reset_indexed_data(9, 0, NULL);
 DO $$ BEGIN ASSERT NOT EXISTS (SELECT 1 FROM qv_module_ci.wallets); END $$;
-

@@ -5,6 +5,11 @@ const files = [
   'supabase/migrations/004_wallet_module_lifecycle.sql',
 ];
 
+const safeResetFiles = [
+  ...files,
+  'supabase/migrations/005_safe_rebuild_deletes.sql',
+];
+
 const requiredPatterns = [
   ['lifecycle table', /wallet_module_events/],
   ['projection ordering block', /last_event_block/],
@@ -36,5 +41,17 @@ for (const file of files) {
   }
 }
 
+for (const file of safeResetFiles) {
+  const sql = await readFile(file, 'utf8');
+  if (!/DELETE FROM wallets WHERE address IS NOT NULL/.test(sql)) {
+    console.error(`FAIL ${file}: reset wallet delete lacks an explicit predicate`);
+    failed = true;
+  }
+  if (!/DELETE FROM tokens WHERE address IS NOT NULL/.test(sql)) {
+    console.error(`FAIL ${file}: reset token delete lacks an explicit predicate`);
+    failed = true;
+  }
+}
+
 if (failed) process.exit(1);
-console.log(`PASS module lifecycle migration structure (${files.length} files)`);
+console.log(`PASS module lifecycle migration structure (${safeResetFiles.length} files)`);
