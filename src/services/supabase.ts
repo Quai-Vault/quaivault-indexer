@@ -4,7 +4,9 @@ import { logger } from '../utils/logger.js';
 import type {
   Wallet,
   WalletOwner,
-  WalletModule,
+  WalletModuleEvent,
+  WalletModuleEventResult,
+  WalletModuleInventory,
   MultisigTransaction,
   Confirmation,
   IndexerState,
@@ -54,10 +56,11 @@ class SupabaseService {
    * Wrap a Supabase error with operation context for debuggability.
    * Preserves the original error code for duplicate detection (23505).
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private fail(operation: string, error: any): never {
-    const wrapped = new Error(`${operation}: ${error.message || JSON.stringify(error)}`);
-    (wrapped as any).code = error.code;
+  private fail(operation: string, error: { message?: string; code?: string }): never {
+    const wrapped: Error & { code?: string } = new Error(
+      `${operation}: ${error.message || JSON.stringify(error)}`
+    );
+    wrapped.code = error.code;
     throw wrapped;
   }
 
@@ -77,38 +80,9 @@ class SupabaseService {
     return {
       lastIndexedBlock: data.last_indexed_block,
       lastBlockHash: data.last_block_hash ?? null,
-      lastIndexedAt: new Date(data.last_indexed_at),
+      lastIndexedAt: data.last_indexed_at ? new Date(data.last_indexed_at) : null,
       isSyncing: data.is_syncing,
     };
-  }
-
-  /**
-   * Delete events recorded after a given block number (reorg cleanup).
-   * Best-effort: logs errors but does not throw, so indexer can continue.
-   */
-  async deleteEventsAfterBlock(blockNumber: number): Promise<void> {
-    const tables = [
-      { table: 'token_transfers', column: 'block_number' },
-      { table: 'deposits', column: 'deposited_at_block' },
-      { table: 'module_executions', column: 'executed_at_block' },
-      { table: 'signed_messages', column: 'signed_at_block' },
-      { table: 'social_recovery_approvals', column: 'approved_at_block' },
-      { table: 'confirmations', column: 'confirmed_at_block' },
-      { table: 'social_recovery_configs', column: 'setup_at_block' },
-      { table: 'social_recovery_guardians', column: 'added_at_block' },
-      { table: 'wallet_delegatecall_targets', column: 'added_at_block' },
-    ];
-    for (const { table, column } of tables) {
-      const { error } = await this.client.from(table).delete().gt(column, blockNumber);
-      if (error) logger.error({ err: error, table, blockNumber }, 'Reorg cleanup failed for table');
-    }
-
-    // Revert target removals that occurred in rolled-back blocks
-    const { error: revertError } = await this.client
-      .from('wallet_delegatecall_targets')
-      .update({ is_active: true, removed_at_block: null, removed_at_tx: null })
-      .gt('removed_at_block', blockNumber);
-    if (revertError) logger.error({ err: revertError, blockNumber }, 'Reorg cleanup failed for delegatecall target removals');
   }
 
   async updateIndexerState(blockNumber: number, blockHash?: string): Promise<void> {
@@ -329,51 +303,87 @@ class SupabaseService {
   // MODULES
   // ============================================
 
-  async addModule(module: WalletModule): Promise<void> {
-    const walletAddress = validateAndNormalizeAddress(module.walletAddress, 'module.walletAddress');
-    const moduleAddress = validateAndNormalizeAddress(module.moduleAddress, 'module.moduleAddress');
-    const enabledAtTx = validateBytes32(module.enabledAtTx, 'module.enabledAtTx');
+  async applyModuleEvent(event: WalletModuleEvent): Promise<WalletModuleEventResult> {
+    if (!Number.isSafeInteger(event.eventBlock) || event.eventBlock < 0) {
+      throw new Error('event.eventBlock must be a non-negative safe integer');
+    }
+    if (!Number.isSafeInteger(event.logIndex) || event.logIndex < 0) {
+      throw new Error('event.logIndex must be a non-negative safe integer');
+    }
+    const walletAddress = validateAndNormalizeAddress(event.walletAddress, 'event.walletAddress');
+    const moduleAddress = validateAndNormalizeAddress(event.moduleAddress, 'event.moduleAddress');
+    const eventTx = validateBytes32(event.eventTx, 'event.eventTx');
+    const eventBlockHash = event.eventBlockHash
+      ? validateBytes32(event.eventBlockHash, 'event.eventBlockHash')
+      : null;
 
-    await withRetry(async () => {
-      const { error } = await this.client.from('wallet_modules').upsert(
-        {
-          wallet_address: walletAddress,
-          module_address: moduleAddress,
-          enabled_at_block: module.enabledAtBlock,
-          enabled_at_tx: enabledAtTx,
-          is_active: true,
-        },
-        { onConflict: 'wallet_address,module_address' }
-      );
+    return withRetry(async () => {
+      const { data, error } = await this.client.rpc('apply_wallet_module_event', {
+        p_wallet: walletAddress,
+        p_module: moduleAddress,
+        p_event_type: event.eventType,
+        p_event_block: event.eventBlock,
+        p_event_block_hash: eventBlockHash,
+        p_event_tx: eventTx,
+        p_log_index: event.logIndex,
+      });
 
-      if (error) this.fail('addModule', error);
-    }, { maxAttempts: 3, delayMs: 1000, operation: 'addModule' });
+      if (error) this.fail('applyModuleEvent', error);
+      if (!['applied', 'duplicate', 'out_of_order', 'orphan_applied'].includes(data)) {
+        throw new Error(`applyModuleEvent: unexpected result "${String(data)}"`);
+      }
+      return data as WalletModuleEventResult;
+    }, { maxAttempts: 3, delayMs: 1000, operation: 'applyModuleEvent' });
   }
 
-  async disableModule(
-    walletAddress: string,
-    moduleAddress: string,
-    disabledAtBlock: number,
-    disabledAtTx: string
-  ): Promise<void> {
+  async getWalletModuleInventory(walletAddress: string): Promise<WalletModuleInventory> {
     const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
-    const normalizedModule = validateAndNormalizeAddress(moduleAddress, 'moduleAddress');
-    const normalizedTx = validateBytes32(disabledAtTx, 'disabledAtTx');
+    const { data, error } = await this.client.rpc('get_wallet_module_inventory', {
+      p_wallet_address: normalizedWallet,
+    });
 
-    await withRetry(async () => {
-      const { error } = await this.client
-        .from('wallet_modules')
-        .update({
-          is_active: false,
-          disabled_at_block: disabledAtBlock,
-          disabled_at_tx: normalizedTx,
-        })
-        .eq('wallet_address', normalizedWallet)
-        .eq('module_address', normalizedModule)
-        .eq('is_active', true);
+    if (error) this.fail('getWalletModuleInventory', error);
+    if (!data) throw new Error('getWalletModuleInventory: database returned no inventory envelope');
+    return data as WalletModuleInventory;
+  }
 
-      if (error) this.fail('disableModule', error);
-    }, { maxAttempts: 3, delayMs: 1000, operation: 'disableModule' });
+  async getActiveModuleAddresses(walletAddress: string): Promise<string[]> {
+    const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
+    const { data, error } = await this.client
+      .from('wallet_modules')
+      .select('module_address')
+      .eq('wallet_address', normalizedWallet)
+      .eq('is_active', true)
+      .order('module_address');
+
+    if (error) this.fail('getActiveModuleAddresses', error);
+    return (data || []).map((row: { module_address: string }) => row.module_address);
+  }
+
+  async rollbackModuleEventsAfterBlock(blockNumber: number): Promise<number> {
+    if (!Number.isSafeInteger(blockNumber) || blockNumber < -1) {
+      throw new Error('rollbackModuleEventsAfterBlock requires an integer block >= -1');
+    }
+    const { data, error } = await this.client.rpc('rollback_wallet_module_events_after', {
+      p_block_number: blockNumber,
+    });
+    if (error) this.fail('rollbackModuleEventsAfterBlock', error);
+    return Number(data || 0);
+  }
+
+  async resetIndexedData(
+    startBlock: number,
+    expected: Pick<IndexerState, 'lastIndexedBlock' | 'lastBlockHash'>
+  ): Promise<void> {
+    if (!Number.isSafeInteger(startBlock) || startBlock < 0) {
+      throw new Error('resetIndexedData requires a non-negative integer start block');
+    }
+    const { error } = await this.client.rpc('reset_indexed_data', {
+      p_last_indexed_block: startBlock - 1,
+      p_expected_indexed_block: expected.lastIndexedBlock,
+      p_expected_block_hash: expected.lastBlockHash,
+    });
+    if (error) this.fail('resetIndexedData', error);
   }
 
   // ============================================
@@ -838,28 +848,31 @@ class SupabaseService {
 
   async getModuleExecutions(
     walletAddress: string,
-    options?: { moduleAddress?: string; successOnly?: boolean; limit?: number }
+    options?: { moduleAddress?: string; success?: boolean; limit?: number }
   ): Promise<ModuleExecution[]> {
     const normalizedWallet = validateAndNormalizeAddress(walletAddress, 'walletAddress');
+    const limit = options?.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      throw new Error('getModuleExecutions limit must be an integer between 1 and 1000');
+    }
 
     let query = this.client
       .from('module_executions')
       .select('*')
       .eq('wallet_address', normalizedWallet)
-      .order('executed_at_block', { ascending: false });
+      .order('executed_at_block', { ascending: false })
+      .order('log_index', { ascending: false, nullsFirst: false });
 
     if (options?.moduleAddress) {
       const normalizedModule = validateAndNormalizeAddress(options.moduleAddress, 'moduleAddress');
       query = query.eq('module_address', normalizedModule);
     }
 
-    if (options?.successOnly) {
-      query = query.eq('success', true);
+    if (options?.success !== undefined) {
+      query = query.eq('success', options.success);
     }
 
-    if (options?.limit) {
-      query = query.limit(options.limit);
-    }
+    query = query.limit(limit);
 
     const { data, error } = await query;
 
@@ -876,6 +889,7 @@ class SupabaseService {
       dataHash: row.data_hash as string | undefined,
       executedAtBlock: row.executed_at_block as number,
       executedAtTx: row.executed_at_tx as string,
+      logIndex: row.log_index as number | undefined,
     }));
   }
 

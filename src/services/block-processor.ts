@@ -15,7 +15,6 @@ import { handleTokenTransfer } from '../events/token-transfer.js';
 import { logger } from '../utils/logger.js';
 import { getModuleContractAddresses } from '../utils/modules.js';
 import { IndexerLog, DecodedEvent, TokenStandard } from '../types/index.js';
-import { health } from './health.js';
 
 /**
  * Callback context for block processing.
@@ -29,7 +28,7 @@ export interface BlockProcessorContext {
   /** Addresses confirmed not to be tokens — bounded LRU to prevent unbounded memory growth */
   notTokenCache: LRUCache<string, boolean>;
   /** Called when a new wallet is discovered via factory events */
-  onWalletDiscovered: (address: string, event: DecodedEvent) => void;
+  onWalletDiscovered: (address: string, event: DecodedEvent) => void | Promise<void>;
 }
 
 /**
@@ -255,7 +254,7 @@ export async function processBlockRange(
       await handleEvent(event);
       if (event.name === 'WalletCreated' || event.name === 'WalletRegistered') {
         const walletAddress = event.args.wallet as string;
-        ctx.onWalletDiscovered(walletAddress, event);
+        await ctx.onWalletDiscovered(walletAddress, event);
       }
     }
   }
@@ -382,7 +381,9 @@ export async function processBlockRange(
     return a.log.index - b.log.index;
   });
 
-  // Process all events (individual try/catch to prevent one bad event from crashing the batch)
+  // Process all events. A handler failure aborts the range so indexer_state is not
+  // advanced past an event that failed to persist; the poll/backfill retry layer
+  // safely replays the idempotent writes.
   for (const { log, priority } of allLogs) {
     try {
       if (priority === 3) {
@@ -400,9 +401,9 @@ export async function processBlockRange(
     } catch (err) {
       logger.error(
         { err, block: log.blockNumber, tx: log.transactionHash, logIndex: log.index },
-        'Failed to process event, skipping'
+        'Failed to process event; aborting block range for retry'
       );
-      health.incrementSkippedEvents();
+      throw err;
     }
   }
 

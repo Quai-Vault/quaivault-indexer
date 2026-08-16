@@ -110,11 +110,62 @@ export interface Confirmation {
 export interface WalletModule {
   walletAddress: string;
   moduleAddress: string;
-  enabledAtBlock: number;
-  enabledAtTx: string;
+  enabledAtBlock?: number;
+  enabledAtTx?: string;
   disabledAtBlock?: number;
   disabledAtTx?: string;
   isActive: boolean;
+  lastEventBlock?: number;
+  lastEventBlockHash?: string;
+  lastEventTx?: string;
+  lastEventLogIndex?: number;
+}
+
+export type WalletModuleEventType = 'enabled' | 'disabled';
+
+export interface WalletModuleEvent {
+  walletAddress: string;
+  moduleAddress: string;
+  eventType: WalletModuleEventType;
+  eventBlock: number;
+  eventBlockHash?: string;
+  eventTx: string;
+  logIndex: number;
+}
+
+export type WalletModuleEventResult =
+  | 'applied'
+  | 'duplicate'
+  | 'out_of_order'
+  | 'orphan_applied';
+
+export interface WalletModuleInventoryItem {
+  moduleAddress: string;
+  isActive: boolean;
+  enabledAtBlock: number | null;
+  enabledAtTx: string | null;
+  disabledAtBlock: number | null;
+  disabledAtTx: string | null;
+  lastEventBlock: number;
+  lastEventBlockHash: string | null;
+  lastEventTx: string;
+  lastEventLogIndex: number;
+  executionCount: number;
+  successfulExecutionCount: number;
+  failedExecutionCount: number;
+  lastExecutionBlock: number | null;
+  lastExecutionTx: string | null;
+  lastExecutionLogIndex: number | null;
+}
+
+export interface WalletModuleInventory {
+  wallet: string;
+  walletIndexed: boolean;
+  walletCreatedAtBlock: number | null;
+  indexedThroughBlock: number;
+  lastIndexedAt: string | null;
+  isSyncing: boolean;
+  modules: WalletModuleInventoryItem[];
 }
 
 export interface WalletDelegatecallTarget {
@@ -130,7 +181,7 @@ export interface WalletDelegatecallTarget {
 export interface IndexerState {
   lastIndexedBlock: number;
   lastBlockHash: string | null;
-  lastIndexedAt: Date;
+  lastIndexedAt: Date | null;
   isSyncing: boolean;
 }
 
@@ -141,6 +192,7 @@ export interface DecodedEvent {
   blockNumber: number;
   transactionHash: string;
   logIndex: number;
+  blockHash?: string;
 }
 
 // ============================================

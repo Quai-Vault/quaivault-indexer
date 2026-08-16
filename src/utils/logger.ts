@@ -63,7 +63,8 @@ export const logger = pino({
     err: (err) => {
       const s = pino.stdSerializers.err(err);
       if (!isDev && s) {
-        const { stack: _, ...rest } = s;
+        const { stack, ...rest } = s;
+        void stack;
         return rest;
       }
       return s;

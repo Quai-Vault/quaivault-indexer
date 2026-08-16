@@ -93,7 +93,7 @@ cmd_status() {
 
     # Try to get health status
     HEALTH_PORT=$(grep HEALTH_CHECK_PORT .env 2>/dev/null | cut -d '=' -f2 | tr -d ' ')
-    HEALTH_PORT=${HEALTH_PORT:-3000}
+    HEALTH_PORT=${HEALTH_PORT:-8080}
 
     if curl -s "http://localhost:$HEALTH_PORT/health" > /dev/null 2>&1; then
         log_info "Health check response:"

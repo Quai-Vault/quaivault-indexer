@@ -2,13 +2,12 @@
  * Event Dispatcher for QuaiVault Indexer
  *
  * Routes decoded events to domain-specific handlers.
- * All errors are caught and logged — never re-thrown — so
- * one malformed event cannot crash the indexer.
+ * Handler failures propagate to the block processor so a batch cannot be
+ * checkpointed when a database write did not complete.
  */
 
 import type { DecodedEvent } from '../types/index.js';
 import { logger } from '../utils/logger.js';
-import { health } from '../services/health.js';
 
 // Domain handlers
 import { handleWalletCreated, handleWalletRegistered } from './factory.js';
@@ -52,8 +51,7 @@ import {
 } from './message-signing.js';
 
 export async function handleEvent(event: DecodedEvent): Promise<void> {
-  try {
-    switch (event.name) {
+  switch (event.name) {
       // Factory events
       case 'WalletCreated':
         await handleWalletCreated(event);
@@ -166,22 +164,7 @@ export async function handleEvent(event: DecodedEvent): Promise<void> {
         logger.debug({ address: event.address }, 'Transfer event reached dispatcher (handled by block processor)');
         break;
 
-      default:
-        logger.debug({ event: event.name }, 'Unhandled event');
-    }
-  } catch (err) {
-    logger.error(
-      {
-        err,
-        event: {
-          name: event.name,
-          address: event.address,
-          blockNumber: event.blockNumber,
-          transactionHash: event.transactionHash,
-        },
-      },
-      'Error handling event - skipping'
-    );
-    health.incrementSkippedEvents();
+    default:
+      logger.debug({ event: event.name }, 'Unhandled event');
   }
 }

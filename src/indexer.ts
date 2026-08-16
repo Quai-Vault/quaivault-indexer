@@ -14,6 +14,8 @@ import { runBackfillLoop } from './utils/backfill-loop.js';
 import { withTimeout } from './utils/timeout.js';
 import type { TokenStandard } from './types/index.js';
 
+class RangeReorgError extends Error {}
+
 export class Indexer {
   private isRunning = false;
   // Set of lowercase wallet addresses for tracking
@@ -37,11 +39,7 @@ export class Indexer {
   // Token refresh throttle — refresh from DB at most once per interval
   private lastTokenRefresh = 0;
   private readonly TOKEN_REFRESH_INTERVAL = 60_000;
-  // Wallet backfill concurrency limiter, queue, and tracking for graceful shutdown
-  private activeWalletBackfills = 0;
-  private readonly MAX_CONCURRENT_WALLET_BACKFILLS = 3;
-  private walletBackfillPromises: Set<Promise<void>> = new Set();
-  private pendingWalletBackfills: Array<{ wallet: string; fromBlock: number; toBlock: number }> = [];
+  private rebuildPending = false;
 
   async start(): Promise<void> {
     logger.info('Starting indexer...');
@@ -72,15 +70,37 @@ export class Indexer {
     );
 
     // Get current state
-    const state = await supabase.getIndexerState();
+    let state = await supabase.getIndexerState();
     const currentBlock = await quai.getBlockNumber();
+
+    // Restore persisted block hash for reorg detection across restarts
+    this.lastBlockHash = state.lastBlockHash;
+
+    // Validate the persisted checkpoint before catch-up can overwrite its hash.
+    // This closes the offline-reorg window between process runs.
+    if (state.lastBlockHash && state.lastIndexedBlock > 0) {
+      const divergentHash = await this.confirmCheckpointDivergence(
+        state.lastIndexedBlock,
+        state.lastBlockHash
+      );
+      if (divergentHash) {
+        logger.error(
+          {
+            block: state.lastIndexedBlock,
+            expected: state.lastBlockHash,
+            actual: divergentHash,
+          },
+          'Offline chain reorg detected — rebuilding indexed state from START_BLOCK'
+        );
+        await this.resetForRebuild(state);
+        state = await supabase.getIndexerState();
+      }
+    }
+
     const startBlock = Math.max(
       state.lastIndexedBlock + 1,
       config.indexer.startBlock
     );
-
-    // Restore persisted block hash for reorg detection across restarts
-    this.lastBlockHash = state.lastBlockHash;
 
     logger.info(
       {
@@ -123,16 +143,6 @@ export class Indexer {
       }
     }
 
-    // Wait for background wallet backfills to finish (with timeout)
-    if (this.walletBackfillPromises.size > 0) {
-      logger.info({ count: this.walletBackfillPromises.size }, 'Waiting for wallet backfills to complete...');
-      await Promise.allSettled(this.walletBackfillPromises);
-    }
-
-    if (this.pendingWalletBackfills.length > 0) {
-      logger.warn({ count: this.pendingWalletBackfills.length }, 'Pending wallet backfills will be lost on shutdown');
-    }
-
     await health.stop();
     logger.info('Indexer stopped');
   }
@@ -149,21 +159,25 @@ export class Indexer {
         processBatch: async (start, end) => {
           await withRetry(
             async () => {
-              await this.indexBlockRange(start, end);
-              const block = await quai.getBlock(end);
-              const hash = block?.hash ?? undefined;
-              await supabase.updateIndexerState(end, hash);
-              this.lastBlockHash = hash ?? null;
+              const result = await this.indexBlockRange(start, end);
+              await supabase.updateIndexerState(end, result.blockHash);
+              this.lastBlockHash = result.blockHash;
             },
-            { operation: `backfill-batch-${start}-${end}` }
+            {
+              operation: `backfill-batch-${start}-${end}`,
+              isRetryable: (error) => !(error instanceof RangeReorgError),
+            }
           );
         },
         onProgress: (start, end, pct) => {
           logger.info({ start, end, progress: `${pct}%` }, 'Backfill progress');
         },
       });
-    } finally {
+      this.rebuildPending = false;
       await supabase.setIsSyncing(false);
+    } catch (error) {
+      if (!this.rebuildPending) await supabase.setIsSyncing(false);
+      throw error;
     }
 
     logger.info('Backfill complete');
@@ -172,12 +186,14 @@ export class Indexer {
   private async indexBlockRange(
     fromBlock: number,
     toBlock: number
-  ): Promise<{ tokensDiscovered: boolean }> {
-    return processBlockRange(fromBlock, toBlock, {
+  ): Promise<{ tokensDiscovered: boolean; blockHash: string }> {
+    const checkpoint = await supabase.getIndexerState();
+    const before = await quai.getBlock(toBlock);
+    const result = await processBlockRange(fromBlock, toBlock, {
       trackedWallets: this.trackedWallets,
       trackedTokens: this.trackedTokens,
       notTokenCache: this.notTokenCache,
-      onWalletDiscovered: (walletAddress, event) => {
+      onWalletDiscovered: async (walletAddress, event) => {
         const walletLower = walletAddress.toLowerCase();
         const isNew = !this.trackedWallets.has(walletLower);
 
@@ -188,28 +204,35 @@ export class Indexer {
           );
         }
 
-        this.trackedWallets.add(walletLower);
-        logger.info({ wallet: walletAddress, block: event.blockNumber }, 'Discovered new wallet');
-
         // WalletRegistered signals a pre-existing wallet being added to the factory.
-        // Backfill its on-chain history prior to the registration block so no
-        // events are missed from before it became tracked.
-        if (event.name === 'WalletRegistered' && isNew) {
+        // Await its earlier history before making the current range checkpointable.
+        // This deliberately replays on a batch retry: the writes are idempotent,
+        // while a fire-and-forget failure would have no durable retry marker.
+        if (event.name === 'WalletRegistered') {
           const historyEnd = event.blockNumber - 1;
           if (historyEnd >= config.indexer.startBlock) {
-            if (this.activeWalletBackfills >= this.MAX_CONCURRENT_WALLET_BACKFILLS) {
-              this.pendingWalletBackfills.push({ wallet: walletLower, fromBlock: config.indexer.startBlock, toBlock: historyEnd });
-              logger.info(
-                { wallet: walletLower, active: this.activeWalletBackfills, queued: this.pendingWalletBackfills.length },
-                'Wallet backfill queued (concurrency limit reached)'
-              );
-            } else {
-              this.startWalletBackfill(walletLower, config.indexer.startBlock, historyEnd);
-            }
+            await withRetry(
+              () => this.backfillWalletHistory(walletLower, config.indexer.startBlock, historyEnd),
+              { operation: `registeredWalletHistory(${walletLower})` }
+            );
           }
         }
+
+        this.trackedWallets.add(walletLower);
+        logger.info({ wallet: walletAddress, block: event.blockNumber, isNew }, 'Discovered wallet');
       },
     });
+
+    const after = await quai.getBlock(toBlock);
+    if (before.hash !== after.hash) {
+      logger.error(
+        { fromBlock, toBlock, beforeHash: before.hash, afterHash: after.hash },
+        'Chain changed while processing a block range; discarding derived state'
+      );
+      await this.resetForRebuild(checkpoint);
+      throw new RangeReorgError(`Chain changed while processing blocks ${fromBlock}-${toBlock}`);
+    }
+    return { ...result, blockHash: after.hash };
   }
 
   private async poll(): Promise<void> {
@@ -276,24 +299,26 @@ export class Indexer {
     // Chain reorg detection: verify the last indexed block hash still matches
     // lastBlockHash is persisted in indexer_state so detection works across restarts
     if (this.lastBlockHash && state.lastIndexedBlock > 0) {
-      const block = await quai.getBlock(state.lastIndexedBlock);
-      if (block && block.hash !== this.lastBlockHash) {
-        const rollbackTo = Math.max(
-          state.lastIndexedBlock - config.indexer.reorgRollbackBlocks,
-          config.indexer.startBlock
-        );
-        logger.warn(
+      const divergentHash = await this.confirmCheckpointDivergence(
+        state.lastIndexedBlock,
+        this.lastBlockHash
+      );
+      if (divergentHash) {
+        logger.error(
           {
             block: state.lastIndexedBlock,
             expected: this.lastBlockHash,
-            actual: block.hash,
-            rollbackTo,
+            actual: divergentHash,
+            rebuildFrom: config.indexer.startBlock,
           },
-          'Chain reorg detected — rolling back indexer state'
+          'Chain reorg detected — rebuilding indexed state from START_BLOCK'
         );
-        await supabase.deleteEventsAfterBlock(rollbackTo);
-        await supabase.updateIndexerState(rollbackTo, undefined);
-        this.lastBlockHash = null;
+
+        // Mutable projections outside the module lifecycle are not fully event-sourced,
+        // so a partial rollback cannot restore every pre-reorg value safely. Wait for
+        // in-flight work, atomically clear derived data, then let the normal
+        // backfill path rebuild from the configured start block.
+        await this.resetForRebuild(state);
         return { caughtUp: false };
       }
     }
@@ -346,37 +371,46 @@ export class Indexer {
         this.lastTokenRefresh = Date.now();
       }
 
-      // Persist block hash alongside state for reorg detection across restarts
-      const lastBlock = await quai.getBlock(safeBlock);
-      const blockHash = lastBlock?.hash ?? null;
-      await supabase.updateIndexerState(safeBlock, blockHash ?? undefined);
-      this.lastBlockHash = blockHash;
+      // Persist the post-processing fence hash alongside the checkpoint.
+      await supabase.updateIndexerState(safeBlock, result.blockHash);
+      this.lastBlockHash = result.blockHash;
+      if (this.rebuildPending) {
+        this.rebuildPending = false;
+        await supabase.setIsSyncing(false);
+      }
     }
 
     return { caughtUp: false };
   }
 
-  private startWalletBackfill(wallet: string, fromBlock: number, toBlock: number): void {
-    this.activeWalletBackfills++;
-    const backfillPromise = withRetry(
-      () => this.backfillWalletHistory(wallet, fromBlock, toBlock),
-      { operation: `backfillWalletHistory(${wallet})` }
-    )
-      .catch((err) => logger.error({ err, wallet }, 'Wallet history backfill failed after retries'))
-      .finally(() => {
-        this.activeWalletBackfills--;
-        this.walletBackfillPromises.delete(backfillPromise);
-        this.drainPendingBackfills();
-      });
-    this.walletBackfillPromises.add(backfillPromise);
+  private async resetForRebuild(
+    expected: { lastIndexedBlock: number; lastBlockHash: string | null }
+  ): Promise<void> {
+    await supabase.resetIndexedData(config.indexer.startBlock, expected);
+    this.trackedWallets.clear();
+    this.trackedTokens.clear();
+    this.notTokenCache.clear();
+    await this.seedTokens();
+    await this.refreshTrackedTokens();
+    this.lastBlockHash = null;
+    this.rebuildPending = true;
   }
 
-  private drainPendingBackfills(): void {
-    while (this.pendingWalletBackfills.length > 0 && this.activeWalletBackfills < this.MAX_CONCURRENT_WALLET_BACKFILLS) {
-      const next = this.pendingWalletBackfills.shift()!;
-      logger.info({ wallet: next.wallet, remaining: this.pendingWalletBackfills.length }, 'Starting queued wallet backfill');
-      this.startWalletBackfill(next.wallet, next.fromBlock, next.toBlock);
+  private async confirmCheckpointDivergence(
+    blockNumber: number,
+    expectedHash: string
+  ): Promise<string | null> {
+    const observed = new Set<string>();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const block = await quai.getBlock(blockNumber);
+      if (block.hash.toLowerCase() === expectedHash.toLowerCase()) return null;
+      observed.add(block.hash);
+      if (attempt < 2) await this.sleep(200);
     }
+    if (observed.size !== 1) {
+      throw new Error(`RPC returned inconsistent hashes for checkpoint block ${blockNumber}`);
+    }
+    return observed.values().next().value ?? null;
   }
 
   /**

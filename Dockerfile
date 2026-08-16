@@ -42,10 +42,10 @@ USER indexer
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:${HEALTH_CHECK_PORT:-3000}/live || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${HEALTH_CHECK_PORT:-8080}/live || exit 1
 
 # Expose health check port
-EXPOSE ${HEALTH_CHECK_PORT:-3000}
+EXPOSE ${HEALTH_CHECK_PORT:-8080}
 
 # Run the indexer
 CMD ["node", "dist/index.js"]

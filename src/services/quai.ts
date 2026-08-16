@@ -10,6 +10,16 @@ import { IndexerLog } from '../types/index.js';
 // Cached ABI coder instance (avoid re-creating per call)
 const abiCoder = quais.AbiCoder.defaultAbiCoder();
 
+interface RawRpcBlock {
+  hash?: unknown;
+  header?: {
+    parentHash?: unknown;
+  };
+  woHeader?: {
+    timestamp?: unknown;
+  };
+}
+
 // RPC connection health thresholds
 const RPC_HEALTH = {
   staleThresholdMs: 60000,     // Consider unhealthy if no success for 1 minute
@@ -169,12 +179,16 @@ class QuaiService {
     }, 'getLogs');
   }
 
-  async callContract(address: string, functionSignature: string): Promise<string> {
+  async callContract(
+    address: string,
+    functionSignature: string,
+    blockTag?: number
+  ): Promise<string> {
     await this.rateLimiter.acquire();
     return this.withTrackedRetry(async () => {
       const selector = quais.id(functionSignature).slice(0, 10);
       return withTimeout(
-        this.provider.call({ from: ZeroAddress, to: address, data: selector }),
+        this.provider.call({ from: ZeroAddress, to: address, data: selector, blockTag }),
         config.rpcTimeout.callTimeoutMs,
         'callContract'
       );
@@ -182,6 +196,37 @@ class QuaiService {
       // CALL_EXCEPTION is permanent (contract doesn't implement the function) — don't retry
       isRetryable: (err) => (err as { code?: string }).code !== 'CALL_EXCEPTION',
     });
+  }
+
+  async getModules(walletAddress: string, blockTag?: number): Promise<string[]> {
+    const encoded = await this.callContract(walletAddress, 'getModules()', blockTag);
+    const decoded = abiCoder.decode(['address[]'], encoded)[0] as string[];
+    return Array.from(decoded, (address) => address.toLowerCase()).sort();
+  }
+
+  /**
+   * Fetch the unformatted RPC block response.
+   *
+   * Some Quai nodes legitimately return null for newer optional header fields
+   * (for example totalEntropy). Older quais SDK formatters reject those blocks
+   * before exposing otherwise valid hash and timestamp fields, so block fences
+   * deliberately use the raw JSON-RPC response.
+   */
+  private async getRawBlock(blockNumber: number, operation: string): Promise<RawRpcBlock> {
+    const block = await withTimeout(
+      this.provider.send(
+        'quai_getBlockByNumber',
+        [quais.toQuantity(blockNumber), false],
+        Shard.Cyprus1
+      ),
+      config.rpcTimeout.callTimeoutMs,
+      operation
+    ) as RawRpcBlock | null;
+
+    if (!block || typeof block !== 'object') {
+      throw new Error(`Block ${blockNumber} not found`);
+    }
+    return block;
   }
 
   async getBlockTimestamp(blockNumber: number): Promise<number> {
@@ -192,17 +237,8 @@ class QuaiService {
 
     await this.rateLimiter.acquire();
     const timestamp = await this.withTrackedRetry(async () => {
-      const block = await withTimeout(
-        this.provider.getBlock(Shard.Cyprus1, blockNumber),
-        config.rpcTimeout.callTimeoutMs,
-        'getBlockTimestamp'
-      );
-      if (!block) {
-        throw new Error(`Block ${blockNumber} not found`);
-      }
-      // woHeader.timestamp is a number at runtime (SDK parses it during formatBlock),
-      // despite the type declaration saying string
-      const raw = block.woHeader.timestamp;
+      const block = await this.getRawBlock(blockNumber, 'getBlockTimestamp');
+      const raw = block.woHeader?.timestamp;
       const ts = typeof raw === 'string' ? parseInt(raw, 16) : Number(raw);
       if (!Number.isFinite(ts) || ts < 0) {
         throw new Error(`Invalid timestamp for block ${blockNumber}: ${raw}`);
@@ -217,22 +253,24 @@ class QuaiService {
   /**
    * Fetch a block by number, returning its hash for reorg detection.
    */
-  async getBlock(blockNumber: number): Promise<{ hash: string; parentHash: string[] } | null> {
+  async getBlock(blockNumber: number): Promise<{ hash: string; parentHash: string[] }> {
     await this.rateLimiter.acquire();
     return this.withTrackedRetry(async () => {
-      const block = await withTimeout(
-        this.provider.getBlock(Shard.Cyprus1, blockNumber),
-        config.rpcTimeout.callTimeoutMs,
-        'getBlock'
-      );
-      if (!block) return null;
-      if (!block.hash) {
-        logger.error({ blockNumber }, 'Block hash missing');
-        return null;
+      const block = await this.getRawBlock(blockNumber, 'getBlock');
+      if (typeof block.hash !== 'string' || block.hash.length === 0) {
+        throw new Error(`Block ${blockNumber} is missing its hash`);
       }
+
+      const rawParentHash = block.header?.parentHash;
+      const parentHash = Array.isArray(rawParentHash)
+        ? rawParentHash.filter((hash): hash is string => typeof hash === 'string')
+        : typeof rawParentHash === 'string'
+          ? [rawParentHash]
+          : [];
+
       return {
         hash: block.hash,
-        parentHash: block.header.parentHash,
+        parentHash,
       };
     }, 'getBlock');
   }

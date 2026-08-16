@@ -1073,7 +1073,7 @@ describe('E2E Indexer Full Lifecycle (Orchard Testnet)', () => {
   // ==========================================================================
 
   describe('Module Management & Execution', () => {
-    it('should index EnabledModule, ExecutionFromModuleSuccess, ExecutionFromModuleFailure, DisabledModule', async () => {
+    it('should index the complete module lifecycle and execution outcomes', async () => {
       if (!mockModule) {
         console.log('  ⏭️ MockModule not configured — skipping');
         return;
@@ -1162,6 +1162,33 @@ describe('E2E Indexer Full Lifecycle (Orchard Testnet)', () => {
       );
       await db.verifyModuleDisabled(walletAddress, moduleAddr);
       console.log('  ✓ DisabledModule indexed');
+
+      // Re-enable and verify the projection clears stale disable provenance while
+      // append-only history preserves all three transitions.
+      await enableModule(wallet, walletAddress, moduleAddr);
+      await indexer.waitUntil(
+        async () => {
+          const modules = await db.getWalletModules(walletAddress);
+          return modules.find(
+            (m) => m.module_address.toLowerCase() === moduleAddr.toLowerCase()
+              && m.is_active
+              && m.disabled_at_block == null
+              && m.disabled_at_tx == null
+          ) || null;
+        },
+        'Module re-enable indexed with cleared disable metadata',
+        e2eConfig.txConfirmationTimeout
+      );
+
+      const lifecycle = await db.getWalletModuleEvents(walletAddress, moduleAddr);
+      expect(lifecycle.slice(-3).map((event) => event.event_type)).toEqual([
+        'enabled',
+        'disabled',
+        'enabled',
+      ]);
+      expect(new Set(lifecycle.map((event) => `${event.event_tx}:${event.log_index}`)).size)
+        .toBe(lifecycle.length);
+      console.log('  ✓ Module re-enable and immutable lifecycle indexed');
     });
   });
 

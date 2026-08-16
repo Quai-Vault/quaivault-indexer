@@ -34,7 +34,7 @@ A blockchain indexing service for QuaiVault multisig wallets on Quai Network. In
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20.19+
 - Supabase project with schema deployed
 - Quai Network RPC access
 
@@ -87,8 +87,9 @@ Run the schema in Supabase SQL Editor:
 # Fresh setup
 supabase/migrations/schema.sql
 
-# Reset and reinitialize (WARNING: deletes all data)
-supabase/reset_and_init.sql
+# Existing deployments: apply numbered migrations in order
+supabase/migrations/000_recovery_status_enum.sql
+# ... through 004_wallet_module_lifecycle.sql
 ```
 
 ### Running
@@ -103,6 +104,10 @@ npm start
 
 # Standalone backfill
 BACKFILL_FROM=5000000 BACKFILL_TO=5100000 npm run backfill
+
+# Restartable module-only lifecycle backfill, then read-only chain reconciliation
+npm run backfill:modules
+npm run reconcile:modules
 ```
 
 ## Project Structure
@@ -152,13 +157,21 @@ src/
 | `wallet_delegatecall_targets` | Per-wallet DelegateCall target whitelist |
 | `transactions` | Proposed multisig transactions (with timelock/expiration) |
 | `confirmations` | Owner approvals for transactions |
-| `wallet_modules` | Enabled modules per wallet |
+| `wallet_modules` | Current enabled/disabled module projection |
+| `wallet_module_events` | Append-only module lifecycle history |
 | `deposits` | QUAI received by wallets |
-| `module_executions` | Zodiac IAvatar module execution results |
+| `module_executions` | Generic Zodiac IAvatar module execution results |
 | `signed_messages` | EIP-1271 signed message hashes |
 | `tokens` | Auto-discovered ERC20/ERC721/ERC1155 token metadata |
 | `token_transfers` | Token transfer history for tracked wallets (including ERC1155 batch fan-out) |
 | `indexer_state` | Sync progress tracking |
+
+`get_wallet_module_inventory(wallet)` returns the current module projection,
+append-only lifecycle provenance, execution aggregates, and index freshness in
+one JSON envelope. Its `walletIndexed` field distinguishes an unknown wallet
+from a known wallet with no module history. Unknown module addresses are deliberately preserved without
+assigning an identity. For authorization decisions, query the live vault's
+`getModules()`/`isModuleEnabled()` state rather than trusting an index alone.
 
 ### Social Recovery Tables
 
@@ -317,8 +330,9 @@ ORDER BY created_at DESC LIMIT 20;
 
 - [TESTING.md](TESTING.md) - Unit and E2E testing guide
 - [DEPLOYMENT.md](DEPLOYMENT.md) - VPS deployment (Docker / systemd)
-- [KNOWN_DATA_GAPS.md](KNOWN_DATA_GAPS.md) - Two cases where indexed state diverges from the chain, with proposed fixes. **Read this before consuming `confirmation_count` or `status` directly.**
-- [INDEXER_FRONTEND_INTEGRATION.md](INDEXER_FRONTEND_INTEGRATION.md) - Frontend integration guide
+- [KNOWN_DATA_GAPS.md](KNOWN_DATA_GAPS.md) - Resolved state-projection gaps and consumer guidance. **Read this before consuming `confirmation_count` or `status` directly.**
+- [DAO_SHIPS_MODULE_INDEXING_PROPOSAL.md](DAO_SHIPS_MODULE_INDEXING_PROPOSAL.md) - Generic module-indexing design and DAO Ships integration boundary
+- [DAO_SHIPS_MODULE_IMPLEMENTATION_PLAN.md](DAO_SHIPS_MODULE_IMPLEMENTATION_PLAN.md) - Delivery, recovery, and verification plan
 
 ## License
 

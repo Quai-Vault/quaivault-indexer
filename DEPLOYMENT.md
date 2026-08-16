@@ -21,7 +21,7 @@ This guide covers deploying the QuaiVault Indexer on a VPS using either Docker o
 - **OS**: Ubuntu 22.04+ or any Linux with Docker support
 - **RAM**: 512MB minimum, 1GB recommended
 - **Disk**: 1GB for application + logs
-- **Node.js**: v18+ (for native deployment)
+- **Node.js**: v20.19+ (for native deployment)
 - **Docker**: v20+ (for Docker deployment)
 
 ### Required Services
@@ -302,6 +302,14 @@ The indexer supports running multiple networks in a **single Supabase project** 
 - Grants permissions to service_role, authenticated, and anon roles
 - Enables Supabase Realtime for frontend subscriptions
 
+For an existing schema, stop the old indexer, apply every numbered migration
+in order, deploy the new code, then run module backfill and reconciliation.
+Migration
+`004_wallet_module_lifecycle.sql` installs the append-only module history,
+ordered projection RPCs, inventory query, and reorg maintenance functions in
+each detected indexer schema. Apply the migration before deploying code that
+calls `apply_wallet_module_event`.
+
 #### Database Structure
 
 ```
@@ -343,7 +351,7 @@ SELECT 'mainnet' as network, COUNT(*) FROM mainnet.wallets;
 #### Legacy/Migration Notes
 
 - If using `SUPABASE_SCHEMA=public` (default), the indexer uses the original `public` schema
-- Existing deployments can continue using `public` without migration
+- Existing `public` deployments are supported, but must receive the same numbered migrations
 - New deployments should use network-specific schemas (`testnet`, `mainnet`)
 
 ---
@@ -425,6 +433,47 @@ docker compose run --rm -e BACKFILL_FROM=0 -e BACKFILL_TO=500000 indexer node di
 |----------|-------------|---------|
 | `BACKFILL_FROM` | Starting block number | `START_BLOCK` |
 | `BACKFILL_TO` | Ending block number | Current block |
+
+### Module Lifecycle Backfill and Reconciliation
+
+After applying migration `004`, keep the indexer stopped and reconstruct
+immutable module history without moving the global indexer checkpoint:
+
+```bash
+npm run backfill:modules
+npm run reconcile:modules
+```
+
+The module backfill scans only `EnabledModule` and `DisabledModule` logs for
+known wallets from `START_BLOCK`. This conservative bound also covers vaults
+imported through `WalletRegistered`, whose earlier creation block is unknown.
+It is safe to restart: source transaction/log identities are
+deduplicated and older events cannot replace newer projected state. The
+reconciliation command is read-only, compares indexed active modules with each
+vault's live `getModules()` result, reports exact missing/stale addresses, and
+exits non-zero on disagreement.
+
+For large deployments, split or resume the job at a completed block-batch
+boundary shown in the logs:
+
+```bash
+MODULE_BACKFILL_FROM=0 MODULE_BACKFILL_TO=5000000 npm run backfill:modules
+MODULE_BACKFILL_FROM=5000001 npm run backfill:modules
+```
+
+Pause the live indexer while running reconciliation. Contract reads are pinned
+to the captured `indexer_state.last_indexed_block`, and the command rejects a
+syncing or changed checkpoint rather than mixing snapshots. The RPC endpoint
+must retain archive state for that block.
+
+Do not run targeted lifecycle rollback before the initial module backfill has
+completed; pre-migration projection rows do not synthesize historical events.
+Confirmed-range reorg recovery is broader: the indexer clears derived data and
+rebuilds from `START_BLOCK` so every mutable projection converges together.
+This is a correctness-first maintenance event: inventory remains marked
+`isSyncing`, derived rows are temporarily unavailable, and large deployments
+should expect database WAL, locks, and an extended catch-up window. The reset
+is checkpoint-fenced so concurrent/stale workers cannot both authorize it.
 
 ---
 

@@ -81,6 +81,8 @@ async function backfill(): Promise<void> {
       toBlock,
       batchSize: config.indexer.batchSize,
       processBatch: async (start, end) => {
+        const checkpoint = await supabase.getIndexerState();
+        const before = await quai.getBlock(end);
         await processBlockRange(start, end, {
           trackedWallets,
           trackedTokens,
@@ -90,7 +92,12 @@ async function backfill(): Promise<void> {
             logger.info({ wallet: walletAddress }, 'Discovered new wallet');
           },
         });
-        await supabase.updateIndexerState(end);
+        const after = await quai.getBlock(end);
+        if (before.hash !== after.hash) {
+          await supabase.resetIndexedData(config.indexer.startBlock, checkpoint);
+          throw new Error(`Chain changed while backfilling blocks ${start}-${end}; aborting without checkpoint`);
+        }
+        await supabase.updateIndexerState(end, after.hash);
       },
       onProgress: (start, end, pct) => {
         logger.info(

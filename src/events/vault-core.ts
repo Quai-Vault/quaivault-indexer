@@ -244,15 +244,17 @@ export async function handleEnabledModule(event: DecodedEvent): Promise<void> {
     module: string;
   }>(event.args, ['module'], 'EnabledModule');
 
-  await supabase.addModule({
+  const result = await supabase.applyModuleEvent({
     walletAddress: event.address,
     moduleAddress: module,
-    enabledAtBlock: event.blockNumber,
-    enabledAtTx: event.transactionHash,
-    isActive: true,
+    eventType: 'enabled',
+    eventBlock: event.blockNumber,
+    eventBlockHash: event.blockHash,
+    eventTx: event.transactionHash,
+    logIndex: event.logIndex,
   });
 
-  logger.info({ wallet: event.address, module }, 'Module enabled');
+  logger.info({ wallet: event.address, module, result }, 'Module enabled');
 }
 
 export async function handleDisabledModule(event: DecodedEvent): Promise<void> {
@@ -260,14 +262,24 @@ export async function handleDisabledModule(event: DecodedEvent): Promise<void> {
     module: string;
   }>(event.args, ['module'], 'DisabledModule');
 
-  await supabase.disableModule(
-    event.address,
-    module,
-    event.blockNumber,
-    event.transactionHash
-  );
+  const result = await supabase.applyModuleEvent({
+    walletAddress: event.address,
+    moduleAddress: module,
+    eventType: 'disabled',
+    eventBlock: event.blockNumber,
+    eventBlockHash: event.blockHash,
+    eventTx: event.transactionHash,
+    logIndex: event.logIndex,
+  });
 
-  logger.info({ wallet: event.address, module }, 'Module disabled');
+  if (result === 'orphan_applied') {
+    logger.warn(
+      { wallet: event.address, module, block: event.blockNumber, tx: event.transactionHash },
+      'Module disable observed without prior projection'
+    );
+  } else {
+    logger.info({ wallet: event.address, module, result }, 'Module disabled');
+  }
 }
 
 export async function handleReceived(event: DecodedEvent): Promise<void> {

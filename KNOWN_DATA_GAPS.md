@@ -21,10 +21,14 @@ All figures below were measured against the live `mainnet` and `testnet` schemas
 | 2 | Expired records stay `pending` | `transactions.status`, `social_recoveries.status` | **High** — two mainnet transactions read as executable today | Yes — 1 recovery, 3 transactions |
 | 3 | `recovery_status` enum missing two labels | `social_recoveries.status` | **High** — recovery expiry/invalidation events silently fail to index | Yes — all three schemas |
 
-> **Status:** both gaps are fixed in code. Gap 2 is addressed by the
-> `*_effective` views (migration `001`), Gap 1 by the `removeOwner` handler plus
-> migrations `002` (columns) and `003` (backfill). Run
-> `npm run verify:gaps` to check any deployment.
+> **Status: resolved and applied to production on 2026-07-27.** Gap 3 is fixed by migration
+> `000`, Gap 2 by the `*_effective` views (`001`), and Gap 1 by the `removeOwner` handler
+> plus `002` (columns) and `003` (backfill). All four migrations are applied to `mainnet`,
+> `testnet` and `dev`, and both Railway indexers run the updated handler.
+>
+> Verified against mainnet chain state after the backfill: the three previously-stale
+> confirmations now report `confirmation_count = 0`, matching `hasApproved()` for every
+> current owner. Run `npm run verify:gaps` to re-check any deployment.
 
 ---
 
@@ -548,32 +552,40 @@ precondition-check the label and raise an actionable error rather than a bare `2
 
 ---
 
-## Guidance for consumers until these are fixed
+## Guidance for consumers
 
-`@quaivault/sdk` already compensates for both, and any other consumer should do the same:
+All three gaps are fixed, so the columns are now trustworthy for display. Two habits are
+still worth keeping.
 
-**For approvals** — intersect confirmations with the current active owner set rather than
-reading `confirmation_count`:
+**Read status from the `*_effective` views, not the base tables.** The base
+`transactions.status` and `social_recoveries.status` intentionally remain `pending` past a
+deadline until somebody calls the permissionless `expireTransaction` / `expireRecovery` and
+the tombstone event is indexed. That is the correct record of *on-chain* state, but it is
+not what a user should see:
 
-```ts
-const active = new Set((await ownersOf(vault)).map(o => o.toLowerCase()));
-const approvalCount = confirmations
-  .filter(c => c.is_active && active.has(c.owner_address.toLowerCase()))
-  .length;
+```sql
+SELECT tx_hash, effective_status FROM <schema>.transactions_effective
+WHERE wallet_address = $1 AND effective_status = 'pending';
 ```
 
-This reproduces `_countValidApprovals` for every case except remove-then-re-add, where it
-still over-counts. **Anything that gates a signature must re-read the chain** — call
-`hasApproved(txHash, owner)` per owner, which is authoritative in all cases.
-
-**For expiry** — derive status from timestamps rather than trusting the column:
+Equivalently, derive it client-side:
 
 ```ts
 if (status === 'pending' && expiration > 0 && now > expiration) status = 'expired';
 ```
 
-Trust the stored status only for states the chain cannot report: `cancelled` recoveries in
-particular, since `cancelRecovery` deletes the on-chain struct entirely.
+**Anything that gates a signature must still re-read the chain.** `confirmation_count` is
+now correct, but it is a cache: it can lag the chain head by a block or more, and an
+approval or removal landing in that window is invisible. Before prompting a user to sign, or
+before an automated execute, call `hasApproved(txHash, owner)` per current owner — that is
+authoritative in every case, including remove-then-re-add.
+
+`@quaivault/sdk` follows both rules: it derives effective status itself (so it stays correct
+against an indexer that has not yet been migrated), intersects confirmations with the live
+owner set as defence in depth, and re-validates on chain before every write. Those
+workarounds are now redundant with a migrated indexer but remain as belt-and-braces — and
+they are what keeps the SDK correct when pointed at a self-hosted indexer that lacks these
+migrations.
 
 ---
 

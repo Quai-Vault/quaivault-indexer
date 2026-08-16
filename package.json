@@ -9,10 +9,14 @@
     "start": "node dist/index.js",
     "build": "tsc",
     "backfill": "tsx src/backfill.ts",
+    "backfill:modules": "tsx src/module-backfill.ts",
+    "reconcile:modules": "tsx src/module-reconcile.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/",
+    "lint": "eslint src/ --max-warnings=0",
     "lint:fix": "eslint src/ --fix",
     "verify:gaps": "node scripts/verify-data-gaps.mjs",
+    "verify:modules": "node scripts/verify-module-migration.mjs",
+    "verify:modules:db": "psql \"$DATABASE_URL\" -f scripts/verify-module-postgres.sql",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -31,13 +35,14 @@
   "devDependencies": {
     "@eslint/js": "^9.0.0",
     "@types/node": "^20.10.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^9.0.0",
     "tsx": "^4.6.0",
     "typescript": "^5.3.0",
     "typescript-eslint": "^8.0.0",
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.10"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   }
 }

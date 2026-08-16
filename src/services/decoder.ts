@@ -187,7 +187,11 @@ export function decodeEvent(log: IndexerLog): DecodedEvent | null {
   }
 
   try {
-    const iface = EVENT_INTERFACES.get(eventName)!;
+    const iface = EVENT_INTERFACES.get(eventName);
+    if (!iface) {
+      logger.warn({ eventName }, 'Event ABI interface was not initialized');
+      return null;
+    }
 
     const decoded = iface.parseLog({
       topics: log.topics as string[],
@@ -226,6 +230,7 @@ export function decodeEvent(log: IndexerLog): DecodedEvent | null {
       args,
       address: log.address,
       blockNumber: log.blockNumber,
+      blockHash: log.blockHash,
       transactionHash: log.transactionHash,
       logIndex: log.index,
     };
@@ -524,7 +529,13 @@ export function decodeCalldata(
 
   // Decode the function arguments
   try {
-    const iface = FUNCTION_INTERFACES.get(selector)!;
+    const iface = FUNCTION_INTERFACES.get(selector);
+    if (!iface) {
+      return {
+        transactionType: resolvedType,
+        decodedParams: { function: functionInfo.name, args: { rawData: data } },
+      };
+    }
     const decoded = iface.parseTransaction({ data, value });
 
     if (!decoded) {
